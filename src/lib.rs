@@ -20,15 +20,32 @@
 //! own integer-to-`HANDLE` map on top; this crate provides the raw
 //! primitives, not that map).
 //!
-//! Phase 3 (this crate's current state): [`process`] and [`job`] —
-//! `spawn_suspended`/`resume`/`wait` (a raw `CreateProcessW` path
-//! `std::process::Command` can't provide, needed only for the
-//! suspend-then-assign-to-job sequencing below) and Windows Job Objects
+//! Phase 3: [`process`] and [`job`] — `spawn_suspended`/`resume`/`wait` (a
+//! raw `CreateProcessW` path `std::process::Command` can't provide, needed
+//! only for the suspend-then-assign-to-job sequencing below) and Windows
+//! Job Objects
 //! (`CreateJobObjectW`/`AssignProcessToJobObject`/`SetInformationJobObject`/
 //! `TerminateJobObject`/`QueryInformationJobObject`), the primitives rush's
 //! own `docs/WINDOWS_JOB_CONTROL.md` designs its background-job tracking
-//! (`&`, `jobs`, `wait`, `kill`, `$!`) against. ConPTY remains future work,
-//! not yet started.
+//! (`&`, `jobs`, `wait`, `kill`, `$!`) against.
+//!
+//! Phase 5 (this crate's current state — Phase 4, ConPTY, is deliberately
+//! skipped for now; see below): [`time`] — `now_monotonic`/`now_realtime`
+//! via `QueryPerformanceCounter`/`GetSystemTimePreciseAsFileTime`, a
+//! genuine parallel to `rusty_libc::vdso`'s "read kernel-shared memory
+//! instead of syscalling" trick. Lowest priority in the analysis doc: no
+//! rush call site needs it (rush uses `std::time` exclusively, and std's
+//! own Windows backend already uses `QueryPerformanceCounter`
+//! internally) — this exists for `rusty_lines`/completeness, not an open
+//! rush gap.
+//!
+//! **Phase 4 (ConPTY/raw terminal mode) is intentionally not started.**
+//! Unlike every phase above, it isn't a self-contained gap in rush's own
+//! `cfg(not(unix))` sites — rush delegates all terminal/raw-mode handling
+//! to the separate `rusty_lines` crate, so building ConPTY primitives here
+//! without confirming what that crate actually needs risks guessing wrong.
+//! The analysis doc flags this explicitly: "coordinate with that crate
+//! before building blind."
 //!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
@@ -59,3 +76,8 @@ pub use process::{SpawnedProcess, current_pid, resume, spawn_suspended, wait};
 
 #[cfg(windows)]
 pub mod job;
+
+#[cfg(windows)]
+pub mod time;
+#[cfg(windows)]
+pub use time::{Timespec, now_monotonic, now_realtime};
