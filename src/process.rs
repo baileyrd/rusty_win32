@@ -88,9 +88,22 @@ unsafe extern "system" {
     ) -> i32;
     fn ResumeThread(thread: RawHandle) -> u32;
     fn WaitForSingleObject(handle: RawHandle, milliseconds: u32) -> u32;
+    fn WaitForMultipleObjects(
+        count: u32,
+        handles: *const RawHandle,
+        wait_all: i32,
+        milliseconds: u32,
+    ) -> u32;
     fn GetExitCodeProcess(process: RawHandle, exit_code: *mut u32) -> i32;
     fn GetCurrentProcessId() -> u32;
 }
+
+/// `WaitForMultipleObjects`'s own hard cap on `nCount` — a documented Win32
+/// limit, not one this crate invents. [`wait_any`] passing more than this
+/// reports [`Win32Error::ERROR_INVALID_PARAMETER`], the same code the real
+/// call fails with, rather than this crate pre-validating and inventing its
+/// own error for the same condition.
+pub const MAXIMUM_WAIT_OBJECTS: usize = 64;
 
 /// A process started by [`spawn_suspended`], still suspended until
 /// [`resume`] is called on `thread`.
@@ -272,6 +285,70 @@ pub unsafe fn wait(process: RawHandle, timeout_ms: Option<u32>) -> Result<Option
     }
 }
 
+/// Block on whichever of `processes` exits *first*, for up to `timeout_ms`
+/// (`None` = wait forever) — the Windows analog of a blocking Unix
+/// `waitpid(-1, ...)` restricted to a known set of pids, and the multi-handle
+/// counterpart to [`wait`]. Returns `Some((index, exit_code))` naming the
+/// first-signaled handle's position in `processes` and its exit code, or
+/// `None` on timeout; call with `Some(0)` for a non-blocking poll across the
+/// whole set at once, rather than looping [`wait`] over each handle in turn.
+///
+/// `processes` must be non-empty and no longer than
+/// [`MAXIMUM_WAIT_OBJECTS`] — `WaitForMultipleObjects`'s own documented
+/// limit on how many handles a single call accepts; passing more (or zero)
+/// reports [`Win32Error::ERROR_INVALID_PARAMETER`], the same failure the raw
+/// call itself would report, not a distinct error this crate invents.
+///
+/// If more than one handle is already signaled at the moment of the call,
+/// which index comes back is `WaitForMultipleObjects`'s own documented
+/// choice (the lowest signaled index), not something this wrapper adds
+/// logic for.
+///
+/// # Safety
+///
+/// Every handle in `processes` must be currently-open and valid.
+pub unsafe fn wait_any(
+    processes: &[RawHandle],
+    timeout_ms: Option<u32>,
+) -> Result<Option<(usize, u32)>, Win32Error> {
+    // SAFETY: `processes` is a caller-supplied slice of valid handles per
+    // this function's own safety contract; `processes.as_ptr()`/`.len()`
+    // describe that same slice, a valid input `WaitForMultipleObjects`
+    // documents (including reporting `ERROR_INVALID_PARAMETER` itself for
+    // an empty or oversized one, rather than this wrapper pre-checking).
+    let result = unsafe {
+        WaitForMultipleObjects(
+            processes.len() as u32,
+            processes.as_ptr(),
+            0,
+            timeout_ms.unwrap_or(INFINITE),
+        )
+    };
+    const WAIT_FAILED: u32 = 0xFFFF_FFFF;
+    match result {
+        WAIT_TIMEOUT => Ok(None),
+        WAIT_FAILED => Err(Win32Error::last()),
+        index if (index as usize) < processes.len() => {
+            let process = processes[index as usize];
+            let mut code: u32 = 0;
+            // SAFETY: `process` is the same valid handle just signaled;
+            // `code` is a valid out-pointer.
+            let ok = unsafe { GetExitCodeProcess(process, &mut code) };
+            if ok == 0 {
+                Err(Win32Error::last())
+            } else {
+                Ok(Some((index as usize, code)))
+            }
+        }
+        // A signaled-index return outside `0..processes.len()` only
+        // happens for the abandoned-mutex range (`WAIT_ABANDONED_0..`),
+        // which can't occur for process handles — process objects are
+        // never abandoned the way a mutex is. Reported as the raw code
+        // rather than silently treated as a timeout or a panic.
+        other => Err(Win32Error::from_raw(other)),
+    }
+}
+
 /// The calling process's own pid — the Windows analog of Unix `getpid`.
 pub fn current_pid() -> u32 {
     // SAFETY: `GetCurrentProcessId` takes no arguments and has no
@@ -313,6 +390,78 @@ mod tests {
             crate::handle::close(spawned.process).unwrap();
             crate::handle::close(spawned.thread).unwrap();
         }
+    }
+
+    #[test]
+    fn wait_any_reports_the_first_process_to_exit() {
+        // Two processes, both started suspended; only one is ever resumed,
+        // so which one `wait_any` reports is deterministic rather than a
+        // race between two real running processes.
+        // SAFETY: hand-built, correctly quoted command lines for a
+        // well-known system binary.
+        let a = unsafe { spawn_suspended("cmd.exe /c exit 3", false, None) }
+            .expect("CreateProcessW should succeed");
+        let b = unsafe { spawn_suspended("cmd.exe /c exit 9", false, None) }
+            .expect("CreateProcessW should succeed");
+
+        // SAFETY: `b.thread` is freshly created, valid, not yet resumed.
+        unsafe { resume(b.thread) }.expect("ResumeThread should succeed");
+
+        // SAFETY: both process handles are valid, currently-open, and
+        // distinct.
+        let (index, code) = unsafe { wait_any(&[a.process, b.process], None) }
+            .unwrap()
+            .expect("one process should have exited");
+        assert_eq!(index, 1, "expected b (index 1), the only resumed process");
+        assert_eq!(code, 9);
+
+        // `a` was never resumed — resume it now so its own exit code (and
+        // the still-suspended thread) don't leak into the test process
+        // list, then clean up every handle.
+        // SAFETY: `a.thread` is freshly created, valid, not yet resumed.
+        unsafe { resume(a.thread) }.expect("ResumeThread should succeed");
+        // SAFETY: `a.process` is a valid, currently-open handle.
+        unsafe { wait(a.process, None) }.unwrap();
+        // SAFETY: every handle here is valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(a.process).unwrap();
+            crate::handle::close(a.thread).unwrap();
+            crate::handle::close(b.process).unwrap();
+            crate::handle::close(b.thread).unwrap();
+        }
+    }
+
+    #[test]
+    fn wait_any_times_out_when_nothing_has_exited() {
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known system binary.
+        let spawned = unsafe { spawn_suspended("cmd.exe /c exit 0", false, None) }
+            .expect("CreateProcessW should succeed");
+
+        // Still suspended, so a zero-timeout wait_any must time out.
+        // SAFETY: `spawned.process` is a freshly created, valid handle.
+        let timed_out = unsafe { wait_any(&[spawned.process], Some(0)) }.unwrap();
+        assert_eq!(timed_out, None);
+
+        // SAFETY: `spawned.thread` is freshly created, valid, not yet
+        // resumed.
+        unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
+        // SAFETY: `spawned.process` is a valid, currently-open handle.
+        unsafe { wait(spawned.process, None) }.unwrap();
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+        }
+    }
+
+    #[test]
+    fn wait_any_rejects_an_empty_slice() {
+        // Matches `WaitForMultipleObjects`'s own documented behavior for
+        // `nCount == 0` — this wrapper doesn't pre-validate and invent a
+        // distinct error for the same condition.
+        let err = unsafe { wait_any(&[], None) }.unwrap_err();
+        assert_eq!(err, Win32Error::ERROR_INVALID_PARAMETER);
     }
 
     #[test]
