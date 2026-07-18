@@ -23,6 +23,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 const CREATE_SUSPENDED: u32 = 0x0000_0004;
+const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
 const INFINITE: u32 = 0xFFFF_FFFF;
 const WAIT_OBJECT_0: u32 = 0;
 const WAIT_TIMEOUT: u32 = 258;
@@ -114,14 +115,29 @@ pub struct SpawnedProcess {
 /// std-handle override here; redirect by swapping the parent's std-handle
 /// slots before spawning, matching `winstdio`'s existing model in rush.
 ///
+/// `environment` overrides the child's environment block; `None` inherits
+/// the calling process's own environment unchanged (`CreateProcessW`'s
+/// default when its `lpEnvironment` argument is null). A caller tracking
+/// its own variable table separately from the real OS environment (rush's
+/// `vars` module never calls `std::env::set_var`, so the two can diverge
+/// after `export`/`unset`) needs `Some(..)` — build the block with
+/// [`environment_block`] rather than hand-rolling it, since `CreateProcessW`
+/// walks it by embedded NULs, not by a length this function could otherwise
+/// validate.
+///
 /// # Safety
 ///
 /// `command_line` must already be a valid, correctly-quoted Windows
 /// command line for the target program (this function does no argument
-/// quoting or escaping of its own).
+/// quoting or escaping of its own). `environment`, if `Some`, must be a
+/// well-formed Windows environment block — a sequence of NUL-terminated
+/// `"NAME=value"` UTF-16 strings followed by one additional NUL — since
+/// `CreateProcessW` reads it by scanning for that terminator, not by the
+/// slice's own length; [`environment_block`] always produces one.
 pub unsafe fn spawn_suspended(
     command_line: &str,
     inherit_handles: bool,
+    environment: Option<&[u16]>,
 ) -> Result<SpawnedProcess, Win32Error> {
     // `CreateProcessW` is documented as possibly writing into this buffer
     // (e.g. inserting a terminating NUL if `lpApplicationName` is NULL and
@@ -139,12 +155,25 @@ pub unsafe fn spawn_suspended(
     };
     let mut process_info = ProcessInformationRaw::default();
 
+    // `CREATE_UNICODE_ENVIRONMENT` is required whenever an explicit
+    // environment block is passed — without it, `CreateProcessW` expects
+    // an ANSI (8-bit) block instead and misreads ours.
+    let creation_flags = if environment.is_some() {
+        CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT
+    } else {
+        CREATE_SUSPENDED
+    };
+    let env_ptr = environment.map_or(core::ptr::null(), |e| {
+        e.as_ptr().cast::<core::ffi::c_void>()
+    });
+
     // SAFETY: `wide` is a valid, mutable, NUL-terminated UTF-16 buffer;
     // `startup_info`/`process_info` are valid, correctly-sized out
-    // pointers with `cb` set as `CreateProcessW` requires; every other
-    // pointer argument is a documented-valid NULL (default security
-    // attributes, no explicit application name/environment/current
-    // directory override).
+    // pointers with `cb` set as `CreateProcessW` requires; `env_ptr` is
+    // either null (inherit) or a well-formed double-NUL-terminated block
+    // per this function's own safety contract; every other pointer
+    // argument is a documented-valid NULL (default security attributes,
+    // no explicit application name/current directory override).
     let ok = unsafe {
         CreateProcessW(
             core::ptr::null(),
@@ -152,8 +181,8 @@ pub unsafe fn spawn_suspended(
             core::ptr::null(),
             core::ptr::null(),
             i32::from(inherit_handles),
-            CREATE_SUSPENDED,
-            core::ptr::null(),
+            creation_flags,
+            env_ptr,
             core::ptr::null(),
             &mut startup_info,
             &mut process_info,
@@ -168,6 +197,32 @@ pub unsafe fn spawn_suspended(
         process_id: process_info.dw_process_id,
         thread_id: process_info.dw_thread_id,
     })
+}
+
+/// Build a Windows environment block for [`spawn_suspended`]'s
+/// `environment` parameter: each `("NAME", "value")` pair encoded as a
+/// NUL-terminated UTF-16 `"NAME=value"` string, back to back, with one
+/// additional NUL terminating the whole block — the exact format
+/// `CreateProcessW` requires when `CREATE_UNICODE_ENVIRONMENT` is set.
+///
+/// `vars` order is preserved as given; callers with a name appearing more
+/// than once should dedupe first (`CreateProcessW`'s own behavior on a
+/// block with a duplicate name is unspecified by its docs).
+pub fn environment_block<'a>(vars: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<u16> {
+    let mut block: Vec<u16> = Vec::new();
+    for (name, value) in vars {
+        block.extend(name.encode_utf16());
+        block.push(u16::from(b'='));
+        block.extend(value.encode_utf16());
+        block.push(0);
+    }
+    block.push(0);
+    if block.len() == 1 {
+        // Zero variables: still terminate with two NULs total, not one —
+        // documented Win32 behavior for an empty environment block.
+        block.push(0);
+    }
+    block
 }
 
 /// Resume a thread suspended by [`spawn_suspended`] (or any other
@@ -234,7 +289,7 @@ mod tests {
         // command, confirm the exit code round-trips.
         // SAFETY: a hand-built, correctly quoted command line for a
         // well-known system binary.
-        let spawned = unsafe { spawn_suspended("cmd.exe /c exit 7", false) }
+        let spawned = unsafe { spawn_suspended("cmd.exe /c exit 7", false, None) }
             .expect("CreateProcessW should succeed");
         assert_ne!(spawned.process_id, 0);
         assert_ne!(spawned.thread_id, 0);
@@ -263,5 +318,53 @@ mod tests {
     #[test]
     fn current_pid_is_nonzero() {
         assert_ne!(current_pid(), 0);
+    }
+
+    #[test]
+    fn spawn_suspended_with_environment_overrides_the_childs_view() {
+        // A minimal environment block containing exactly one variable: if
+        // it reaches the child, `if defined` sees it and the process exits
+        // 42; if `environment` were silently ignored (e.g. the flag/pointer
+        // wiring regressed), the child would see none of our variables and
+        // exit 1 instead — the round trip a plain "does it compile" check
+        // wouldn't catch.
+        let block = environment_block(core::iter::once(("RUSTY_WIN32_TEST_VAR", "1")));
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known system binary; `block` was built by
+        // `environment_block`, which always double-NUL-terminates.
+        let spawned = unsafe {
+            spawn_suspended(
+                "cmd.exe /c if defined RUSTY_WIN32_TEST_VAR (exit 42) else (exit 1)",
+                false,
+                Some(&block),
+            )
+        }
+        .expect("CreateProcessW should succeed");
+
+        // SAFETY: `spawned.thread` is freshly created, not yet resumed.
+        unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
+        // SAFETY: `spawned.process` is a valid, currently-open handle.
+        let exit_code = unsafe { wait(spawned.process, None) }.unwrap();
+        assert_eq!(exit_code, Some(42));
+
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+        }
+    }
+
+    #[test]
+    fn environment_block_is_double_nul_terminated() {
+        let block = environment_block(core::iter::empty());
+        assert_eq!(block, alloc::vec![0u16, 0u16]);
+
+        let block = environment_block([("A", "1"), ("B", "2")].into_iter());
+        let text: alloc::string::String =
+            char::decode_utf16(block[..block.len() - 1].iter().copied())
+                .map(|r| r.unwrap())
+                .collect();
+        assert_eq!(text, "A=1\0B=2\0");
+        assert_eq!(block.last(), Some(&0u16));
     }
 }
