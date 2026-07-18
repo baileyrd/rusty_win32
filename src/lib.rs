@@ -29,23 +29,39 @@
 //! own `docs/WINDOWS_JOB_CONTROL.md` designs its background-job tracking
 //! (`&`, `jobs`, `wait`, `kill`, `$!`) against.
 //!
-//! Phase 5 (this crate's current state — Phase 4, ConPTY, is deliberately
-//! skipped for now; see below): [`time`] — `now_monotonic`/`now_realtime`
-//! via `QueryPerformanceCounter`/`GetSystemTimePreciseAsFileTime`, a
-//! genuine parallel to `rusty_libc::vdso`'s "read kernel-shared memory
-//! instead of syscalling" trick. Lowest priority in the analysis doc: no
-//! rush call site needs it (rush uses `std::time` exclusively, and std's
-//! own Windows backend already uses `QueryPerformanceCounter`
-//! internally) — this exists for `rusty_lines`/completeness, not an open
-//! rush gap.
+//! Phase 5: [`time`] — `now_monotonic`/`now_realtime` via
+//! `QueryPerformanceCounter`/`GetSystemTimePreciseAsFileTime`, a genuine
+//! parallel to `rusty_libc::vdso`'s "read kernel-shared memory instead of
+//! syscalling" trick. Lowest priority in the analysis doc: no rush call
+//! site needs it (rush uses `std::time` exclusively, and std's own Windows
+//! backend already uses `QueryPerformanceCounter` internally) — this
+//! exists for `rusty_lines`/completeness, not an open rush gap.
 //!
-//! **Phase 4 (ConPTY/raw terminal mode) is intentionally not started.**
-//! Unlike every phase above, it isn't a self-contained gap in rush's own
-//! `cfg(not(unix))` sites — rush delegates all terminal/raw-mode handling
-//! to the separate `rusty_lines` crate, so building ConPTY primitives here
-//! without confirming what that crate actually needs risks guessing wrong.
-//! The analysis doc flags this explicitly: "coordinate with that crate
-//! before building blind."
+//! Phase 4 (this crate's current state — implemented *after* Phase 5,
+//! once its actual shape was confirmed rather than guessed): raw-mode
+//! primitives added to [`console`] —
+//! [`console::get_mode`]/[`console::set_mode`] (`GetConsoleMode`/
+//! `SetConsoleMode`), [`console::read`] (`ReadFile`), [`console::wait_readable`]
+//! (`WaitForSingleObject`), and [`console::window_size`]
+//! (`GetConsoleScreenBufferInfo`). **Deliberately not ConPTY**: the
+//! original handoff doc's sketch ("`CreatePseudoConsole`-backed raw mode")
+//! turned out to be the wrong primitive after actually reading
+//! `rusty_lines`' source rather than assuming — `CreatePseudoConsole` hosts
+//! a *child* process's console session (what a terminal emulator does);
+//! `rusty_lines` reads from its own inherited stdin, exactly the way the
+//! Unix backend calls `tcgetattr`/`tcsetattr` on its own fd. The real
+//! analog of `tcgetattr`/`tcsetattr` is `GetConsoleMode`/`SetConsoleMode`,
+//! and `ENABLE_VIRTUAL_TERMINAL_INPUT` (Windows 10+, within this crate's
+//! existing floor) is what makes `ReadFile` on a console handle deliver a
+//! Unix-tty-like VT/ANSI byte stream instead of requiring
+//! `ReadConsoleInputW`'s structured records. This also corrected a factual
+//! error the original phasing carried: rush's own
+//! `docs/WINDOWS_BACKEND_ANALYSIS.md` had claimed Windows Ctrl-C-at-idle-prompt
+//! already worked via `rusty_lines`; it doesn't — `rusty_lines`' non-Unix
+//! path has no Ctrl-C handling at all today (see that doc's own
+//! corrected text). As with `rusty_libc`'s `tcgetattr`/`tcsetattr`, this
+//! crate exposes the primitive only — deciding which mode bits constitute
+//! "raw mode" is `rusty_lines`' policy, not this crate's.
 //!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
