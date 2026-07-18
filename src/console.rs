@@ -300,35 +300,81 @@ pub unsafe fn window_size(console_output: RawHandle) -> Result<(u16, u16), Win32
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate alloc;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn AllocConsole() -> i32;
-        fn GetStdHandle(std_handle: u32) -> RawHandle;
+        fn CreateFileW(
+            file_name: *const u16,
+            desired_access: u32,
+            share_mode: u32,
+            security_attributes: *const core::ffi::c_void,
+            creation_disposition: u32,
+            flags_and_attributes: u32,
+            template_file: RawHandle,
+        ) -> RawHandle;
     }
-    const STD_INPUT_HANDLE: u32 = -10i32 as u32;
-    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const OPEN_EXISTING: u32 = 3;
 
-    /// A real console input handle, allocating a fresh console if the test
-    /// process doesn't already have one — GitHub Actions' `windows-latest`
-    /// runner's exact console-attachment state for a `cargo test` process
-    /// isn't something this sandbox (no Windows machine) can verify ahead
-    /// of time, so this makes the mode/window-size tests below work either
-    /// way rather than assuming.
+    /// Open a real handle to whatever console this process is attached to
+    /// — `CreateFileW("CONIN$"/"CONOUT$", …)`, Microsoft's own documented
+    /// way to get a console handle. Deliberately **not** `GetStdHandle`:
+    /// if the test process's std handles were redirected (e.g. `cargo
+    /// test` under a CI runner with stdin closed/NUL), `GetStdHandle`
+    /// keeps returning the redirected handle even after `AllocConsole`
+    /// gives the process a real console — a documented Windows quirk
+    /// found the hard way (the first version of this test used
+    /// `GetStdHandle` and failed on `windows-latest` CI with
+    /// `ERROR_INVALID_HANDLE`). `CONIN$`/`CONOUT$` sidestep the whole
+    /// redirection question by always naming the *actual* attached
+    /// console, whatever the std handles say.
+    fn open_console(name: &str) -> Option<RawHandle> {
+        let wide: alloc::vec::Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+        // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string naming a
+        // well-known console pseudo-device; the other arguments are
+        // documented-valid constants for opening an existing device for
+        // read/write, shared.
+        let h = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                core::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                core::ptr::null_mut(),
+            )
+        };
+        if h.is_null() || h as isize == -1 {
+            None
+        } else {
+            Some(h)
+        }
+    }
+
+    /// A real console input handle, allocating a fresh console via
+    /// `AllocConsole` if the test process doesn't already have one
+    /// attached — GitHub Actions' `windows-latest` runner's exact
+    /// console-attachment state for a `cargo test` process isn't something
+    /// this sandbox (no Windows machine) can verify ahead of time, so this
+    /// makes the mode/window-size tests below work either way rather than
+    /// assuming.
     fn ensure_console_stdin() -> RawHandle {
-        // SAFETY: `GetStdHandle` has no precondition.
-        let h = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-        // SAFETY: `h` was just obtained from `GetStdHandle`.
-        if unsafe { get_mode(h) }.is_ok() {
+        if let Some(h) = open_console("CONIN$") {
             return h;
         }
         // SAFETY: `AllocConsole` has no precondition; a failure here (e.g.
-        // a console already exists) is handled by re-fetching the std
-        // handle regardless, which will then point at whatever console is
-        // actually attached.
+        // a console already exists under a name this function didn't
+        // manage to open for an unrelated reason) is handled by the
+        // `expect` below surfacing a clear panic rather than silently
+        // returning a null/invalid handle.
         unsafe { AllocConsole() };
-        // SAFETY: see above.
-        unsafe { GetStdHandle(STD_INPUT_HANDLE) }
+        open_console("CONIN$").expect("AllocConsole should provide an openable console")
     }
 
     extern "system" fn noop_handler(_ctrl_type: u32) -> i32 {
@@ -384,10 +430,8 @@ mod tests {
     #[test]
     fn window_size_reports_a_plausible_size() {
         let _ = ensure_console_stdin(); // guarantee a console exists first
-        // SAFETY: `GetStdHandle` has no precondition; fetched only after
-        // `ensure_console_stdin` guarantees a console (and thus a paired,
-        // valid output buffer) exists.
-        let stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+        let stdout = open_console("CONOUT$")
+            .expect("a console output buffer should be openable once a console exists");
         // SAFETY: `stdout` is a valid console output handle per the above.
         let (cols, rows) =
             unsafe { window_size(stdout) }.expect("GetConsoleScreenBufferInfo should succeed");
