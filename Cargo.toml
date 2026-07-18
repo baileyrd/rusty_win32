@@ -1,0 +1,18 @@
+[package]
+name = "rusty_win32"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "A #![no_std]-where-possible, minimal-dependency Windows backend for rush's sys::win32"
+repository = "https://github.com/baileyrd/rusty_win32"
+
+[dependencies]
+
+[features]
+default = []
+# Adds `From<Win32Error> for std::io::Error` and other std-only ergonomics.
+# The crate is `no_std` without this feature.
+std = []
+
+[lints.clippy]
+missing_safety_doc = "warn"
