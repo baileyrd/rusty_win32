@@ -57,6 +57,12 @@ unsafe extern "system" {
         buffer_info: *mut ConsoleScreenBufferInfo,
     ) -> i32;
     fn WaitForSingleObject(handle: RawHandle, milliseconds: u32) -> u32;
+    fn WriteConsoleInputW(
+        console_input: RawHandle,
+        buffer: *const InputRecordKeyEvent,
+        length: u32,
+        events_written: *mut u32,
+    ) -> i32;
 }
 
 const WAIT_OBJECT_0: u32 = 0;
@@ -149,6 +155,47 @@ struct ConsoleScreenBufferInfo {
 }
 const _: () = assert!(core::mem::size_of::<ConsoleScreenBufferInfo>() == 22);
 const _: () = assert!(core::mem::align_of::<ConsoleScreenBufferInfo>() == 2);
+
+/// `KEY_EVENT` — the `EventType` this crate ever writes via
+/// [`write_char_events`] (Windows also defines `MOUSE_EVENT`/
+/// `WINDOW_BUFFER_SIZE_EVENT`/`MENU_EVENT`/`FOCUS_EVENT`, out of this
+/// crate's scope).
+const KEY_EVENT: u16 = 0x0001;
+
+// KEY_EVENT_RECORD: `size_of` 16, `align_of` 4 on x86_64. Verified against
+// mingw-w64's `wincon.h` the same way as every other struct in this crate
+// (a `_Static_assert` probe compiled with `x86_64-w64-mingw32-gcc` against
+// the real header). `uChar` is a C union of `WCHAR`/`CHAR`; only the
+// (wider) `WCHAR` variant is represented here since this crate only ever
+// writes Unicode characters, never `AsciiChar`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KeyEventRecord {
+    key_down: i32, // WINBOOL
+    repeat_count: u16,
+    virtual_key_code: u16,
+    virtual_scan_code: u16,
+    unicode_char: u16, // uChar union's WCHAR variant
+    control_key_state: u32,
+}
+const _: () = assert!(core::mem::size_of::<KeyEventRecord>() == 16);
+const _: () = assert!(core::mem::align_of::<KeyEventRecord>() == 4);
+
+// INPUT_RECORD: `size_of` 20, `align_of` 4 — `EventType` (2 bytes) plus
+// `repr(C)`'s automatic 2-byte padding before the (4-byte-aligned) `Event`
+// union, which this crate only ever populates as a `KeyEventRecord` (the
+// union's widest member, so this struct's total size already matches the
+// real `INPUT_RECORD`'s regardless of the other variants this crate never
+// constructs).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct InputRecordKeyEvent {
+    event_type: u16,
+    key_event: KeyEventRecord,
+}
+const _: () = assert!(core::mem::size_of::<InputRecordKeyEvent>() == 20);
+const _: () = assert!(core::mem::align_of::<InputRecordKeyEvent>() == 4);
+const _: () = assert!(core::mem::offset_of!(InputRecordKeyEvent, key_event) == 4);
 
 /// Push `handler` onto the process-wide console-control-handler chain.
 ///
@@ -297,6 +344,66 @@ pub unsafe fn window_size(console_output: RawHandle) -> Result<(u16, u16), Win32
     Ok((cols, rows))
 }
 
+/// Synthesize `text` as a sequence of real console key events —
+/// `WriteConsoleInputW`, the standard, documented technique console
+/// automation tools use to inject keystrokes (queues `INPUT_RECORD`s into
+/// the same input buffer a real keyboard driver would). Each character
+/// becomes a key-down/key-up pair carrying it via `uChar`, not a real
+/// virtual-key code — valid for ordinary printable characters *and* ASCII
+/// control characters (`'\r'`, `\x03` for Ctrl-C, `\x10` for Ctrl-P, …:
+/// Windows' own real key events for those carry exactly these `uChar`
+/// values), but not for non-character keys (arrows, function keys, Home/
+/// End) that carry no `uChar` at all — those need real virtual-key codes,
+/// out of this function's scope. Returns the number of events written
+/// (twice the character count, barring a partial write).
+///
+/// With `ENABLE_VIRTUAL_TERMINAL_INPUT` set on `handle` (see
+/// [`ENABLE_VIRTUAL_TERMINAL_INPUT`]), a subsequent [`read`] on the same
+/// handle observes these as the equivalent VT/ANSI byte(s) — the same
+/// translation a real keypress goes through — making this the primitive a
+/// test can use to drive a raw-mode reader through its real Windows I/O
+/// path end to end, the Windows analog of writing bytes into one end of a
+/// Unix pty.
+///
+/// # Safety
+///
+/// `handle` must be a currently-open, valid console input handle.
+pub unsafe fn write_char_events(handle: RawHandle, text: &str) -> Result<u32, Win32Error> {
+    extern crate alloc;
+    use alloc::vec::Vec;
+
+    let mut records: Vec<InputRecordKeyEvent> = Vec::with_capacity(text.chars().count() * 2);
+    for ch in text.chars() {
+        let mut units = [0u16; 2];
+        for &unit in ch.encode_utf16(&mut units).iter() {
+            for key_down in [1i32, 0i32] {
+                records.push(InputRecordKeyEvent {
+                    event_type: KEY_EVENT,
+                    key_event: KeyEventRecord {
+                        key_down,
+                        repeat_count: 1,
+                        virtual_key_code: 0,
+                        virtual_scan_code: 0,
+                        unicode_char: unit,
+                        control_key_state: 0,
+                    },
+                });
+            }
+        }
+    }
+    let mut written: u32 = 0;
+    // SAFETY: `handle` is caller-supplied per this function's own safety
+    // contract; `records` is a valid buffer of exactly `records.len()`
+    // initialized `InputRecordKeyEvent`s; `written` is a valid out-pointer.
+    let ok =
+        unsafe { WriteConsoleInputW(handle, records.as_ptr(), records.len() as u32, &mut written) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(written)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,5 +544,57 @@ mod tests {
             unsafe { window_size(stdout) }.expect("GetConsoleScreenBufferInfo should succeed");
         assert!(cols > 0, "a real console should report a nonzero width");
         assert!(rows > 0, "a real console should report a nonzero height");
+    }
+
+    /// The empirical validation this whole primitive exists for: does a
+    /// character synthesized via `write_char_events`, under the exact
+    /// raw-mode recipe a real consumer (`rusty_lines`' Windows `term_sys`
+    /// backend) applies, actually come back out of a `read` as the same
+    /// byte(s) a real keypress would produce? This is the assumption every
+    /// higher-level "drive a raw-mode reader with synthetic input" test
+    /// depends on — proving it here, in isolation, means a failure here
+    /// points straight at this primitive rather than masquerading as a
+    /// mysterious failure three layers up in a consumer's own test suite.
+    #[test]
+    fn write_char_events_round_trips_through_raw_mode_read() {
+        let stdin = ensure_console_stdin();
+        // SAFETY: `stdin` is a real, valid console input handle.
+        let original = unsafe { get_mode(stdin) }.expect("GetConsoleMode should succeed");
+        let raw = (original & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT))
+            | ENABLE_VIRTUAL_TERMINAL_INPUT
+            | ENABLE_EXTENDED_FLAGS;
+        // SAFETY: `stdin` is the same valid handle; `raw` is a plain
+        // bitmask derived from a mode Windows itself just reported valid.
+        unsafe { set_mode(stdin, raw) }.expect("SetConsoleMode should succeed");
+
+        // A mix of an ordinary printable character and the ASCII control
+        // character Ctrl-C maps to (`\x03`) — covers both "the console's
+        // VT translation passes an ordinary char through as-is" and "an
+        // ASCII control character round-trips as its own byte value",
+        // which is specifically the case rush's Ctrl-C-at-idle-prompt
+        // handling and the emacs keymap's Ctrl-bindings both depend on.
+        let text = "a\x03";
+        // SAFETY: `stdin` is the same valid, real console input handle.
+        let written =
+            unsafe { write_char_events(stdin, text) }.expect("WriteConsoleInputW should succeed");
+        assert_eq!(
+            written,
+            (text.chars().count() * 2) as u32,
+            "one down+up pair per char"
+        );
+
+        let mut buf = [0u8; 16];
+        // SAFETY: `stdin` is the same valid handle; `buf` is a valid,
+        // writable buffer.
+        let n = unsafe { read(stdin, &mut buf) }.expect("ReadFile should succeed");
+        assert_eq!(
+            &buf[..n],
+            text.as_bytes(),
+            "raw-mode VT-input-mode read should return the same bytes a real keypress would"
+        );
+
+        // SAFETY: `stdin` is still the same valid handle; restoring the
+        // original mode so this test doesn't leak state into others.
+        unsafe { set_mode(stdin, original) }.expect("restoring the original mode should succeed");
     }
 }

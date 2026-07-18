@@ -63,12 +63,27 @@
 //! crate exposes the primitive only — deciding which mode bits constitute
 //! "raw mode" is `rusty_lines`' policy, not this crate's.
 //!
+//! [`console::write_char_events`] (`WriteConsoleInputW`) followed later,
+//! for a different reason than the phases above: not a rush or
+//! `rusty_lines` production need, but the primitive a *test* needs to
+//! synthesize real console input and drive a raw-mode reader through its
+//! real Windows I/O path end to end — the Windows analog of writing bytes
+//! into one end of a Unix pty, without needing ConPTY (which this crate
+//! still doesn't have — see the "Deliberately not ConPTY" note above for
+//! why that's the right call for `rusty_lines`' own reads, and note this
+//! primitive is a narrower thing: synthesizing input into an *existing*
+//! console this process already owns, not hosting a *child* process's
+//! console session). Its own test empirically proves the
+//! `WriteConsoleInputW` → `ENABLE_VIRTUAL_TERMINAL_INPUT` → `ReadFile`
+//! round trip actually produces the same bytes a real keypress would,
+//! rather than assuming it.
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or
 //! an unquoted command line (`handle`'s and `job`'s handle-taking
-//! functions, `process::spawn_suspended`/`resume`/`wait`) — everything else
-//! is safe.
+//! functions, `console::write_char_events`,
+//! `process::spawn_suspended`/`resume`/`wait`) — everything else is safe.
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
