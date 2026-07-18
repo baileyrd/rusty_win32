@@ -93,6 +93,14 @@
 //! builds directly, not a `std::process::Command` that could otherwise
 //! just call `.env_clear()`/`.envs()` itself.
 //!
+//! [`job::clear_kill_on_close`] followed for the same consumer's `disown`
+//! builtin: a job created via [`job::create`]/[`job::set_kill_on_close`]
+//! ties its member processes' lifetime to the job handle, which closes
+//! implicitly at the owning process's own exit exactly like any other
+//! handle — so a caller can't just stop tracking a job and drop its
+//! handle to detach a process from the shell's lifetime; the kill-on-close
+//! limit itself has to be reversed first, or the process dies anyway.
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or

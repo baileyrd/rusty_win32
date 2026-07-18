@@ -154,6 +154,38 @@ pub unsafe fn set_kill_on_close(job: RawHandle) -> Result<(), Win32Error> {
     }
 }
 
+/// Clear `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` on `job` (the reverse of
+/// [`set_kill_on_close`]): its member processes survive every handle to
+/// `job` closing, including implicitly at this process's own exit —
+/// backs `disown`. Without this, there's no way to let a tracked job
+/// outlive the shell: a job handle is closed exactly like any other
+/// handle when its owning process terminates, so kill-on-close would
+/// still fire even if a caller simply stopped tracking the job and closed
+/// its own handle to it, or just exited without closing anything at all.
+///
+/// # Safety
+///
+/// `job` must be a currently-open, valid Job Object handle.
+pub unsafe fn clear_kill_on_close(job: RawHandle) -> Result<(), Win32Error> {
+    let info = JobObjectExtendedLimitInformation::default();
+    // SAFETY: `job` is caller-supplied per this function's own safety
+    // contract; `info` is a valid, correctly-sized, initialized struct of
+    // exactly the type `JobObjectExtendedLimitInformation` names.
+    let ok = unsafe {
+        SetInformationJobObject(
+            job,
+            JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            (&info as *const JobObjectExtendedLimitInformation).cast(),
+            core::mem::size_of::<JobObjectExtendedLimitInformation>() as u32,
+        )
+    };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
 /// Assign `process` to `job`. Any child `process` itself later spawns
 /// inherits job membership automatically. Must happen before a
 /// `CREATE_SUSPENDED`-started `process` is resumed (see
@@ -289,6 +321,45 @@ mod tests {
             crate::handle::close(spawned.process).unwrap();
             crate::handle::close(spawned.thread).unwrap();
             crate::handle::close(job).unwrap();
+        }
+    }
+
+    #[test]
+    fn clear_kill_on_close_lets_the_process_survive_closing_the_job_handle() {
+        let job = create().expect("CreateJobObjectW should succeed");
+        // SAFETY: `job` is freshly created and valid.
+        unsafe { set_kill_on_close(job).expect("SetInformationJobObject should succeed") };
+
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known system binary.
+        let spawned = unsafe { process::spawn_suspended("cmd.exe /c exit 3", false, None) }
+            .expect("CreateProcessW should succeed");
+        // SAFETY: `job`/`spawned.process` are both freshly created, valid
+        // handles; assignment happens before `resume`.
+        unsafe { assign(job, spawned.process).expect("AssignProcessToJobObject should succeed") };
+        // SAFETY: `spawned.thread` is a freshly created, valid,
+        // not-yet-resumed thread handle.
+        unsafe { process::resume(spawned.thread).expect("ResumeThread should succeed") };
+
+        // SAFETY: `job` is a valid handle; this is the operation under
+        // test — reversing kill-on-close before the handle closes below.
+        unsafe { clear_kill_on_close(job).expect("SetInformationJobObject should succeed") };
+        // SAFETY: `job` is a valid, currently-open handle, closed exactly
+        // once. Without `clear_kill_on_close` above actually working,
+        // this would terminate `spawned.process` immediately instead of
+        // letting it run to its own natural exit.
+        unsafe { crate::handle::close(job).unwrap() };
+
+        // SAFETY: `spawned.process` is still a valid handle — closing the
+        // job handle doesn't invalidate it, only (were kill-on-close still
+        // set) the process it names.
+        let exit = unsafe { process::wait(spawned.process, Some(5_000)) }.unwrap();
+        assert_eq!(exit, Some(3));
+
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
         }
     }
 }
