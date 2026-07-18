@@ -101,12 +101,24 @@
 //! handle to detach a process from the shell's lifetime; the kill-on-close
 //! limit itself has to be reversed first, or the process dies anyway.
 //!
+//! [`process::wait_any`] followed for the same consumer's `wait -n`: without
+//! it, blocking on "whichever of several tracked background jobs finishes
+//! first" had no primitive to build on beyond looping [`process::wait`]
+//! with a zero timeout over every handle in turn and sleeping between
+//! sweeps — a real but coarser stand-in `docs/WINDOWS_JOB_CONTROL.md`
+//! explicitly flagged as a follow-up once this existed.
+//! `WaitForMultipleObjects` (`bWaitAll = FALSE`) is the actual OS primitive
+//! for that; this wrapper's contract mirrors `process::wait`'s (same
+//! `Option<u32>` timeout convention, same exit-code fetch via
+//! `GetExitCodeProcess`), just over a slice of handles instead of one.
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or
 //! an unquoted command line (`handle`'s and `job`'s handle-taking
 //! functions, `console::write_char_events`,
-//! `process::spawn_suspended`/`resume`/`wait`) — everything else is safe.
+//! `process::spawn_suspended`/`resume`/`wait`/`wait_any`) — everything else
+//! is safe.
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
