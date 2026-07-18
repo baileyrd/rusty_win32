@@ -259,7 +259,7 @@ mod tests {
         // well-known long-running system command — this test terminates it
         // via the job before it would exit on its own.
         let spawned =
-            unsafe { process::spawn_suspended("cmd.exe /c ping -n 30 127.0.0.1 >nul", true) }
+            unsafe { process::spawn_suspended("cmd.exe /c ping -n 30 127.0.0.1 >nul", true, None) }
                 .expect("CreateProcessW should succeed");
 
         // SAFETY: `job`/`spawned.process` are both freshly created, valid

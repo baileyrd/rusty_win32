@@ -78,6 +78,21 @@
 //! round trip actually produces the same bytes a real keypress would,
 //! rather than assuming it.
 //!
+//! [`process::environment_block`] followed for rush's own first real
+//! consumer of Phase 3: `rush`'s `vars` module never calls
+//! `std::env::set_var`/`remove_var` (it keeps its own exported-variable
+//! table instead — see that crate's `expand.rs`), so after any
+//! `export`/`unset` the real OS environment `spawn_suspended` used to
+//! inherit by default would silently diverge from what `rush` itself
+//! believes a child should see. `spawn_suspended` now takes an optional
+//! environment block built by this function, so a caller tracking its own
+//! variable table can hand `CreateProcessW` a from-scratch one instead of
+//! relying on inheritance — needed for `rush`'s upcoming Windows
+//! background-job support (`docs/WINDOWS_JOB_CONTROL.md` in the rush repo),
+//! where the spawned child is a `CREATE_SUSPENDED` process this crate
+//! builds directly, not a `std::process::Command` that could otherwise
+//! just call `.env_clear()`/`.envs()` itself.
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or
