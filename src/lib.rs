@@ -9,13 +9,18 @@
 //! primitive-by-primitive analysis this crate's module boundaries and
 //! phasing are derived from.
 //!
-//! Phase 1 (this crate's current state): [`error::Win32Error`] and
-//! [`console::install_ctrl_handler`] — closing rush's single highest-value,
-//! lowest-risk Windows gap identified by that analysis: `trap 'cmd' TERM` is
-//! silently accepted on Windows today but has nothing installed to ever fire
-//! it. Everything else the analysis doc scopes — `process`/`job` for
-//! background jobs (Job Objects), `handle` for the fd-3-and-up gap, ConPTY —
-//! is future work, not yet started.
+//! Phase 1: [`error::Win32Error`] and [`console::install_ctrl_handler`] —
+//! closing rush's single highest-value, lowest-risk Windows gap identified
+//! by that analysis: `trap 'cmd' TERM` is silently accepted on Windows today
+//! but has nothing installed to ever fire it.
+//!
+//! Phase 2 (this crate's current state): [`handle`] —
+//! `DuplicateHandle`/`CreatePipe`/`SetHandleInformation`/`CloseHandle`, the
+//! primitive rush's own fd-3-and-up gap needs (rush still has to grow its
+//! own integer-to-`HANDLE` map on top; this crate provides the raw
+//! primitives, not that map). Everything else the analysis doc scopes —
+//! `process`/`job` for background jobs (Job Objects), ConPTY — is future
+//! work, not yet started.
 //!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
@@ -31,3 +36,8 @@ pub use error::Win32Error;
 pub mod console;
 #[cfg(windows)]
 pub use console::{HandlerRoutine, install_ctrl_handler, remove_ctrl_handler};
+
+#[cfg(windows)]
+pub mod handle;
+#[cfg(windows)]
+pub use handle::{RawHandle, close, create_pipe, duplicate, set_inheritable};
