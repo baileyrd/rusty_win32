@@ -151,6 +151,13 @@
 //! Win32 set — junctions/mount points are a deliberate scope cut, not an
 //! oversight.
 //!
+//! [`process::environment_snapshot`] (`GetEnvironmentStringsW`) closes the
+//! read-back gap [`process::environment_block`] left open: that function
+//! only ever *builds* a block for a spawned child, with no way for a
+//! caller to *seed* its own variable table from the real environment this
+//! process actually inherited at startup — needed once, by `rush`'s `vars`
+//! module, before it starts tracking exports/unsets on its own.
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or
@@ -179,7 +186,8 @@ pub mod process;
 #[cfg(windows)]
 pub use process::{
     MAXIMUM_WAIT_OBJECTS, PROCESS_TERMINATE, SYNCHRONIZE, SpawnedProcess, current_pid,
-    environment_block, open_by_pid, resume, spawn_suspended, terminate, wait, wait_any,
+    environment_block, environment_snapshot, open_by_pid, resume, spawn_suspended, terminate, wait,
+    wait_any,
 };
 
 // `job`'s six-item surface (`create`/`assign`/`set_kill_on_close`/
