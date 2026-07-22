@@ -142,6 +142,15 @@
 //! and file index — Windows' closest analog of a Unix `(st_dev, st_ino)`
 //! pair — which a bare path can't answer without opening a handle first.
 //!
+//! [`fs::create_symlink`]/[`fs::readlink`]/[`fs::final_path`]
+//! (`CreateSymbolicLinkW`/`DeviceIoControl(FSCTL_GET_REPARSE_POINT)`/
+//! `GetFinalPathNameByHandleW`) round out `fs` with `ln -s` parity and
+//! reparse-point resolution. `readlink` only parses the symlink variant of
+//! `REPARSE_DATA_BUFFER` — an NT-native structure with no ordinary Win32
+//! API, verified against mingw-w64's DDK headers rather than the usual
+//! Win32 set — junctions/mount points are a deliberate scope cut, not an
+//! oversight.
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or
