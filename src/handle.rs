@@ -48,6 +48,14 @@ unsafe extern "system" {
     ) -> i32;
     fn SetHandleInformation(object: RawHandle, mask: u32, flags: u32) -> i32;
     fn CloseHandle(object: RawHandle) -> i32;
+    fn PeekNamedPipe(
+        named_pipe: RawHandle,
+        buffer: *mut u8,
+        buffer_size: u32,
+        bytes_read: *mut u32,
+        total_bytes_avail: *mut u32,
+        bytes_left_this_message: *mut u32,
+    ) -> i32;
 }
 
 /// Create an anonymous pipe, returning `(read_handle, write_handle)`.
@@ -155,6 +163,43 @@ pub unsafe fn close(handle: RawHandle) -> Result<(), Win32Error> {
     }
 }
 
+/// How many bytes are currently available to read from `pipe_read_handle`
+/// without blocking — `PeekNamedPipe`, the pipe-specific analog of
+/// [`crate::console::wait_readable`]'s `WaitForSingleObject`-based check.
+/// An anonymous pipe read end from [`create_pipe`] isn't usable the same way
+/// `wait_readable` uses a console input handle — Windows' answer for "is
+/// there data yet, don't block" on a pipe is this call instead. Does not
+/// consume any data: a subsequent real read still sees every byte this
+/// reports as available.
+///
+/// # Safety
+///
+/// `pipe_read_handle` must be a currently-open, valid handle to the read end
+/// of a pipe.
+pub unsafe fn pipe_bytes_available(pipe_read_handle: RawHandle) -> Result<u32, Win32Error> {
+    let mut total_avail: u32 = 0;
+    // SAFETY: `pipe_read_handle` is caller-supplied per this function's own
+    // safety contract; passing NULL for the buffer/bytes-read/
+    // bytes-left-this-message out-parameters is documented valid when the
+    // caller only wants the total-available count (`buffer_size = 0`);
+    // `total_avail` is a valid out-pointer.
+    let ok = unsafe {
+        PeekNamedPipe(
+            pipe_read_handle,
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+            &mut total_avail,
+            core::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(total_avail)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +284,51 @@ mod tests {
             assert!(close(write_handle).is_err());
             close(read_handle).unwrap();
         }
+    }
+
+    #[test]
+    fn pipe_bytes_available_reports_zero_for_an_empty_pipe() {
+        let (read_handle, write_handle) = create_pipe().expect("CreatePipe should succeed");
+        // SAFETY: `read_handle` is freshly created and valid.
+        let avail =
+            unsafe { pipe_bytes_available(read_handle) }.expect("PeekNamedPipe should succeed");
+        assert_eq!(avail, 0);
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            close(read_handle).unwrap();
+            close(write_handle).unwrap();
+        }
+    }
+
+    #[test]
+    fn pipe_bytes_available_reports_written_data_without_consuming_it() {
+        use std::io::{Read, Write};
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
+
+        let (read_handle, write_handle) = create_pipe().expect("CreatePipe should succeed");
+        // SAFETY: `write_handle` is freshly created, valid, and uniquely
+        // owned by this test.
+        let mut writer =
+            std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(write_handle as _) });
+        writer.write_all(b"rusty_win32").unwrap();
+
+        // SAFETY: `read_handle` is freshly created, valid, and still open
+        // (not yet wrapped/moved into an owning `File` below).
+        let avail =
+            unsafe { pipe_bytes_available(read_handle) }.expect("PeekNamedPipe should succeed");
+        assert_eq!(avail, "rusty_win32".len() as u32);
+
+        drop(writer); // close the write end so the read below sees EOF after the data
+
+        // SAFETY: `read_handle` is still the same valid handle; nothing else
+        // holds or will close it.
+        let mut reader =
+            std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(read_handle as _) });
+        let mut got = std::string::String::new();
+        reader.read_to_string(&mut got).unwrap();
+        assert_eq!(
+            got, "rusty_win32",
+            "peeking must not have consumed any bytes"
+        );
     }
 }
