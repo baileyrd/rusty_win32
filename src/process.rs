@@ -98,6 +98,8 @@ unsafe extern "system" {
     fn GetCurrentProcessId() -> u32;
     fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> RawHandle;
     fn TerminateProcess(process: RawHandle, exit_code: u32) -> i32;
+    fn GetEnvironmentStringsW() -> *mut u16;
+    fn FreeEnvironmentStringsW(penv: *mut u16) -> i32;
 }
 
 /// `OpenProcess`'s access-rights bit letting the returned handle be passed to
@@ -246,6 +248,78 @@ pub fn environment_block<'a>(vars: impl Iterator<Item = (&'a str, &'a str)>) -> 
         block.push(0);
     }
     block
+}
+
+/// Snapshot the calling process's real environment as
+/// `(name, value)` pairs — `GetEnvironmentStringsW`, the read-back
+/// counterpart to [`environment_block`]. Exists for a caller that needs to
+/// *seed* its own variable table from the real inherited environment at
+/// startup (unlike `spawn_suspended`'s `environment` parameter, which only
+/// ever *writes* a block for a child) — a caller tracking its own table
+/// separately from the OS environment (as `rush`'s `vars` module does)
+/// needs exactly this once, before it starts tracking exports/unsets
+/// itself.
+///
+/// Includes Windows' own `=C:=C:\path`-style hidden per-drive
+/// current-directory entries (name `=C:`, `=D:`, ...) exactly as
+/// `GetEnvironmentStringsW` reports them, rather than this wrapper
+/// silently filtering them — deciding whether a caller's variable table
+/// should carry these is the caller's policy, the same way this crate
+/// exposes raw `FILE_ATTRIBUTE_*`/`ENABLE_*` bits without deciding what
+/// they mean.
+pub fn environment_snapshot()
+-> Result<Vec<(alloc::string::String, alloc::string::String)>, Win32Error> {
+    // SAFETY: `GetEnvironmentStringsW` takes no arguments; a `NULL` return
+    // is its own documented (if practically unreachable) failure mode,
+    // handled below rather than assumed away.
+    let ptr = unsafe { GetEnvironmentStringsW() };
+    if ptr.is_null() {
+        return Err(Win32Error::last());
+    }
+
+    let mut pairs = Vec::new();
+    let mut entry_start = 0usize;
+    let mut i = 0usize;
+    // SAFETY: `ptr` is the just-returned, valid pointer to a block
+    // documented as a sequence of NUL-terminated UTF-16 strings ending in
+    // one additional NUL; this walk reads only up through that terminator.
+    unsafe {
+        loop {
+            if *ptr.add(i) == 0 {
+                if i == entry_start {
+                    // An empty entry marks the block's own end (the
+                    // additional NUL after the last real "NAME=value").
+                    break;
+                }
+                let entry = core::slice::from_raw_parts(ptr.add(entry_start), i - entry_start);
+                if let Some(pair) = parse_environment_entry(entry) {
+                    pairs.push(pair);
+                }
+                entry_start = i + 1;
+            }
+            i += 1;
+        }
+    }
+    // SAFETY: `ptr` was returned by `GetEnvironmentStringsW` above and not
+    // used again after this.
+    unsafe { FreeEnvironmentStringsW(ptr) };
+    Ok(pairs)
+}
+
+/// Split one `GetEnvironmentStringsW` entry (already known non-empty, no
+/// terminating NUL included) into `(name, value)`. The search for `=`
+/// deliberately skips index 0: Windows' own hidden `=C:=C:\path` per-drive
+/// current-directory entries carry a leading `=` that's part of the name,
+/// not a separator — the real, and only, separator is the *next* `=` after
+/// that.
+fn parse_environment_entry(
+    units: &[u16],
+) -> Option<(alloc::string::String, alloc::string::String)> {
+    let equals_index = 1 + units.get(1..)?.iter().position(|&u| u == u16::from(b'='))?;
+    Some((
+        alloc::string::String::from_utf16_lossy(&units[..equals_index]),
+        alloc::string::String::from_utf16_lossy(&units[equals_index + 1..]),
+    ))
 }
 
 /// Resume a thread suspended by [`spawn_suspended`] (or any other
@@ -619,5 +693,38 @@ mod tests {
                 .collect();
         assert_eq!(text, "A=1\0B=2\0");
         assert_eq!(block.last(), Some(&0u16));
+    }
+
+    #[test]
+    fn environment_snapshot_includes_a_well_known_system_variable() {
+        let pairs = environment_snapshot().expect("GetEnvironmentStringsW should succeed");
+        assert!(
+            pairs
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("SystemRoot")),
+            "every real Windows process should have SystemRoot in its environment"
+        );
+    }
+
+    #[test]
+    fn environment_snapshot_includes_a_variable_this_process_just_set() {
+        // SAFETY: this crate's CI runs its test suite with
+        // RUST_TEST_THREADS=1 (see .github/workflows/ci.yml), so no other
+        // test can concurrently read/write the real environment while this
+        // one does.
+        unsafe { std::env::set_var("RUSTY_WIN32_ENV_SNAPSHOT_TEST", "hello") };
+
+        let pairs = environment_snapshot().expect("GetEnvironmentStringsW should succeed");
+        let found = pairs
+            .iter()
+            .find(|(name, _)| name == "RUSTY_WIN32_ENV_SNAPSHOT_TEST");
+        assert_eq!(
+            found.map(|(_, value)| value.as_str()),
+            Some("hello"),
+            "the snapshot should include a variable this process just set"
+        );
+
+        // SAFETY: see above.
+        unsafe { std::env::remove_var("RUSTY_WIN32_ENV_SNAPSHOT_TEST") };
     }
 }
