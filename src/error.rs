@@ -5,10 +5,27 @@
 use core::fmt;
 
 #[cfg(windows)]
+extern crate alloc;
+
+#[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetLastError() -> u32;
+    fn FormatMessageW(
+        flags: u32,
+        source: *const core::ffi::c_void,
+        message_id: u32,
+        language_id: u32,
+        buffer: *mut u16,
+        size: u32,
+        arguments: *mut core::ffi::c_void,
+    ) -> u32;
 }
+
+#[cfg(windows)]
+const FORMAT_MESSAGE_FROM_SYSTEM: u32 = 0x0000_1000;
+#[cfg(windows)]
+const FORMAT_MESSAGE_IGNORE_INSERTS: u32 = 0x0000_0200;
 
 /// A Win32 error code, as returned by `GetLastError()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -33,6 +50,49 @@ impl Win32Error {
     /// The raw numeric code.
     pub const fn code(self) -> u32 {
         self.0
+    }
+
+    /// The full system-provided message text for this code —
+    /// `FormatMessageW`, looked up from Windows' own system message table.
+    /// Unlike `Display` (which only recognizes the handful of codes named
+    /// as associated constants above, a fast, allocation-free path), this
+    /// covers virtually any Win32 error code Windows itself knows how to
+    /// describe, at the cost of an allocation and a real system call —
+    /// use `Display`/`to_string()` for the common case, this for a code
+    /// that isn't one of the named constants.
+    ///
+    /// Returns `None` if `FormatMessageW` itself fails: an unrecognized
+    /// code, or (practically unreachable for a real system message) one
+    /// too long for this call's fixed-size buffer. Callers should fall
+    /// back to `Display`'s "unknown Win32 error N" wording in that case.
+    #[cfg(windows)]
+    pub fn message(self) -> Option<alloc::string::String> {
+        let mut buf = [0u16; 512];
+        // SAFETY: `source`/`arguments` are documented-valid NULLs for a
+        // system-message-table lookup with printf-style inserts ignored
+        // (`FORMAT_MESSAGE_IGNORE_INSERTS`, since this crate has no
+        // `va_list` to provide and no message it looks up needs one);
+        // `buf` is a valid, `buf.len()`-element writable buffer.
+        let len = unsafe {
+            FormatMessageW(
+                FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                core::ptr::null(),
+                self.0,
+                0,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                core::ptr::null_mut(),
+            )
+        };
+        if len == 0 {
+            return None;
+        }
+        // System messages end in "\r\n"; trimmed so this reads consistently
+        // with `Display`'s own messages, which carry no trailing newline.
+        let mut text = alloc::string::String::from_utf16_lossy(&buf[..len as usize]);
+        let trimmed_len = text.trim_end().len();
+        text.truncate(trimmed_len);
+        Some(text)
     }
 }
 
@@ -133,6 +193,29 @@ mod tests {
             Win32Error::ERROR_FILE_NOT_FOUND,
             Win32Error::ERROR_PATH_NOT_FOUND
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn message_returns_real_system_text_for_a_known_code() {
+        // Not asserting an exact string: this is real OS-provided text
+        // (locale/build-dependent in general), so only a robust invariant
+        // is checked rather than betting on exact capitalization/
+        // punctuation this sandbox has no Windows machine to verify.
+        let msg = Win32Error::ERROR_ACCESS_DENIED
+            .message()
+            .expect("FormatMessageW should succeed for a well-known code");
+        let lower = msg.to_ascii_lowercase();
+        assert!(
+            lower.contains("access") && lower.contains("denied"),
+            "expected the real system message to mention access/denied, got {msg:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn message_returns_none_for_an_unrecognized_code() {
+        assert_eq!(Win32Error::from_raw(424242).message(), None);
     }
 
     #[cfg(feature = "std")]

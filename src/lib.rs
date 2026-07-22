@@ -158,6 +158,14 @@
 //! process actually inherited at startup — needed once, by `rush`'s `vars`
 //! module, before it starts tracking exports/unsets on its own.
 //!
+//! [`error::Win32Error::message`] (`FormatMessageW`) covers the gap
+//! `Display`'s fixed, hand-maintained table always had: anything outside
+//! its ~25 named codes prints "unknown Win32 error N" even though Windows
+//! itself can usually describe the code. `message` is the slower,
+//! allocating fallback for that case — `Display`'s table stays the fast,
+//! allocation-free path for the common/named codes, rather than replacing
+//! it outright.
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or
