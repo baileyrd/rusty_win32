@@ -86,6 +86,7 @@ win32_errors! {
     ERROR_IO_PENDING = 997 => "overlapped I/O operation is in progress",
     ERROR_NOT_FOUND = 1168 => "element not found",
     ERROR_TIMEOUT = 1460 => "this operation returned because the timeout period expired",
+    ERROR_NOT_A_REPARSE_POINT = 4390 => "the file or directory is not a reparse point",
 }
 
 impl core::error::Error for Win32Error {}

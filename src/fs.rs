@@ -571,25 +571,36 @@ mod tests {
             "readlink should report exactly the target create_symlink was given"
         );
 
-        // The symlink itself must not be reported as a directory (it's a
-        // file symlink), and following it via a plain stat should reach
-        // the real target's actual content size.
+        // `GetFileAttributesExW` on a symlink path reports the reparse
+        // point's own attributes without following it (Windows' `lstat`-
+        // like behavior for this call) — the reparse-point bit must be
+        // set, and its reported size is the reparse point data's own size,
+        // not the target's content size.
         let link_info = stat(link_str).expect("GetFileAttributesExW on the symlink should succeed");
-        assert_eq!(link_info.size, "rusty_win32 symlink target".len() as u64);
+        assert!(
+            link_info.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+            "a symlink path should report the reparse-point attribute"
+        );
 
         std::fs::remove_file(&link).expect("cleaning up the symlink should succeed");
         std::fs::remove_file(&target).expect("cleaning up the target file should succeed");
     }
 
     #[test]
-    fn readlink_reports_not_supported_for_a_plain_file() {
+    fn readlink_fails_for_a_plain_file() {
+        // A plain file isn't a reparse point at all, so
+        // `DeviceIoControl(FSCTL_GET_REPARSE_POINT)` itself fails with
+        // `ERROR_NOT_A_REPARSE_POINT` — this exercises that path, not
+        // `readlink`'s own `ERROR_NOT_SUPPORTED` tag-mismatch branch (which
+        // needs an actual non-symlink reparse point, e.g. a junction, out
+        // of this test's scope to construct).
         let path = std::env::temp_dir().join("rusty_win32_fs_not_a_symlink.txt");
         std::fs::write(&path, b"plain file, not a reparse point")
             .expect("writing the test file should succeed");
 
         let err = readlink(path.to_str().unwrap())
             .expect_err("readlink on a plain file should fail, not succeed");
-        assert_eq!(err, Win32Error::ERROR_NOT_SUPPORTED);
+        assert_eq!(err, Win32Error::ERROR_NOT_A_REPARSE_POINT);
 
         std::fs::remove_file(&path).expect("cleaning up the test file should succeed");
     }
