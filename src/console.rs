@@ -63,7 +63,19 @@ unsafe extern "system" {
         length: u32,
         events_written: *mut u32,
     ) -> i32;
+    fn GetConsoleCP() -> u32;
+    fn SetConsoleCP(code_page_id: u32) -> i32;
+    fn GetConsoleOutputCP() -> u32;
+    fn SetConsoleOutputCP(code_page_id: u32) -> i32;
 }
+
+/// The UTF-8 code page identifier, for [`set_input_codepage`]/
+/// [`set_output_codepage`] — a console defaults to the system's legacy
+/// (OEM/ANSI) code page, which can mis-render non-ASCII bytes even once
+/// [`ENABLE_VIRTUAL_TERMINAL_PROCESSING`]/[`ENABLE_VIRTUAL_TERMINAL_INPUT`]
+/// are otherwise correctly configured — the Windows analog of making sure a
+/// Unix terminal's locale is UTF-8.
+pub const CP_UTF8: u32 = 65001;
 
 const WAIT_OBJECT_0: u32 = 0;
 const WAIT_TIMEOUT: u32 = 258;
@@ -262,6 +274,68 @@ pub unsafe fn set_mode(console_handle: RawHandle, mode: u32) -> Result<(), Win32
     // SAFETY: `console_handle` is caller-supplied per this function's own
     // safety contract; `mode` is a plain bitmask, not a pointer.
     let ok = unsafe { SetConsoleMode(console_handle, mode) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
+/// The calling process's console input code page — `GetConsoleCP`, the
+/// analog of `GetConsoleMode` but for character encoding rather than input
+/// behavior. Governs how bytes `ReadFile`/`ReadConsole` deliver (without
+/// [`ENABLE_VIRTUAL_TERMINAL_INPUT`]'s VT byte-stream path) are interpreted.
+pub fn input_codepage() -> Result<u32, Win32Error> {
+    // SAFETY: `GetConsoleCP` takes no arguments and has no precondition
+    // beyond "a console may or may not be attached", which it reports as an
+    // ordinary `0`/`GetLastError` failure rather than undefined behavior.
+    let cp = unsafe { GetConsoleCP() };
+    if cp == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(cp)
+    }
+}
+
+/// Set the calling process's console input code page — `SetConsoleCP`. Pass
+/// [`CP_UTF8`] so typed non-ASCII characters are interpreted as UTF-8
+/// instead of the system's legacy code page.
+pub fn set_input_codepage(code_page_id: u32) -> Result<(), Win32Error> {
+    // SAFETY: `code_page_id` is a plain value, not a pointer.
+    let ok = unsafe { SetConsoleCP(code_page_id) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
+/// The calling process's console output code page — `GetConsoleOutputCP`,
+/// the output-side counterpart of [`input_codepage`]. Governs how bytes
+/// written to the console (without
+/// [`ENABLE_VIRTUAL_TERMINAL_PROCESSING`]'s VT-aware path, which is
+/// itself byte-value-agnostic) are decoded for display.
+pub fn output_codepage() -> Result<u32, Win32Error> {
+    // SAFETY: see `input_codepage` — same "no precondition beyond a
+    // possibly-absent console" contract.
+    let cp = unsafe { GetConsoleOutputCP() };
+    if cp == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(cp)
+    }
+}
+
+/// Set the calling process's console output code page — `SetConsoleOutputCP`.
+/// Pass [`CP_UTF8`] so UTF-8 bytes written to the console (e.g. a prompt or
+/// completion list containing non-ASCII characters) render correctly instead
+/// of being mis-decoded under the system's legacy code page — the single
+/// bit that makes a Windows console's *output* behave like a Unix
+/// terminal's for non-ASCII text, the same way
+/// [`ENABLE_VIRTUAL_TERMINAL_PROCESSING`] does for escape sequences.
+pub fn set_output_codepage(code_page_id: u32) -> Result<(), Win32Error> {
+    // SAFETY: `code_page_id` is a plain value, not a pointer.
+    let ok = unsafe { SetConsoleOutputCP(code_page_id) };
     if ok == 0 {
         Err(Win32Error::last())
     } else {
@@ -521,6 +595,32 @@ mod tests {
         // SAFETY: `stdin` is still the same valid handle; restoring the
         // original mode so this test doesn't leak state into others.
         unsafe { set_mode(stdin, original) }.expect("restoring the original mode should succeed");
+    }
+
+    #[test]
+    fn input_codepage_round_trips_through_utf8() {
+        let _ = ensure_console_stdin(); // guarantee a console exists first
+        let original = input_codepage().expect("GetConsoleCP should succeed");
+
+        set_input_codepage(CP_UTF8).expect("SetConsoleCP should succeed");
+        assert_eq!(input_codepage().unwrap(), CP_UTF8);
+
+        // Restore the original code page so this test doesn't leak state
+        // into others.
+        set_input_codepage(original).expect("restoring the original code page should succeed");
+    }
+
+    #[test]
+    fn output_codepage_round_trips_through_utf8() {
+        let _ = ensure_console_stdin(); // guarantee a console exists first
+        let original = output_codepage().expect("GetConsoleOutputCP should succeed");
+
+        set_output_codepage(CP_UTF8).expect("SetConsoleOutputCP should succeed");
+        assert_eq!(output_codepage().unwrap(), CP_UTF8);
+
+        // Restore the original code page so this test doesn't leak state
+        // into others.
+        set_output_codepage(original).expect("restoring the original code page should succeed");
     }
 
     #[test]
