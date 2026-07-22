@@ -125,6 +125,15 @@
 //! the real environment out from under a caller tracking its own variable
 //! table.
 //!
+//! [`job::associate_completion_port`]/[`job::wait_for_message`] close
+//! another gap the same assessment flagged: [`job::process_ids`] is a poll,
+//! never a push — there was no Unix-`SIGCHLD` equivalent for "a job member
+//! just exited" without looping that poll on a timer. Windows repurposes
+//! I/O completion ports (otherwise a file-I/O mechanism, not a process-
+//! lifecycle one) for job notifications instead of defining a job-specific
+//! primitive, so that's what this crate wraps, rather than inventing its
+//! own polling loop as a permanent stand-in.
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or
