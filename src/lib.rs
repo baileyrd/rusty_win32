@@ -134,6 +134,14 @@
 //! primitive, so that's what this crate wraps, rather than inventing its
 //! own polling loop as a permanent stand-in.
 //!
+//! [`fs::stat`]/[`fs::stat_by_handle`] (`GetFileAttributesExW`/
+//! `GetFileInformationByHandle`) close another capability-assessment gap:
+//! Windows has no `stat`/`fstat` equivalent in this crate at all yet, and
+//! `ls`, globbing, and the `[ -d/-f ]` test operators all need one
+//! eventually. `stat_by_handle` additionally reports a volume serial number
+//! and file index — Windows' closest analog of a Unix `(st_dev, st_ino)`
+//! pair — which a bare path can't answer without opening a handle first.
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or
@@ -184,3 +192,10 @@ pub use time::{Timespec, now_monotonic, now_realtime};
 pub mod path;
 #[cfg(windows)]
 pub use path::{resolve_command, search_path};
+
+// `fs`'s several-item surface (two functions, two result structs, and the
+// `FILE_ATTRIBUTE_*` constants) is deliberately not re-exported at the
+// crate root either, for the same reason as `job`'s — reach it via
+// `rusty_win32::fs::*`.
+#[cfg(windows)]
+pub mod fs;
