@@ -96,7 +96,17 @@ unsafe extern "system" {
     ) -> u32;
     fn GetExitCodeProcess(process: RawHandle, exit_code: *mut u32) -> i32;
     fn GetCurrentProcessId() -> u32;
+    fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> RawHandle;
+    fn TerminateProcess(process: RawHandle, exit_code: u32) -> i32;
 }
+
+/// `OpenProcess`'s access-rights bit letting the returned handle be passed to
+/// [`terminate`].
+pub const PROCESS_TERMINATE: u32 = 0x0001;
+/// `OpenProcess`'s access-rights bit letting the returned handle be passed to
+/// [`wait`]/[`wait_any`] (a process handle must carry this right to be
+/// waitable at all).
+pub const SYNCHRONIZE: u32 = 0x0010_0000;
 
 /// `WaitForMultipleObjects`'s own hard cap on `nCount` — a documented Win32
 /// limit, not one this crate invents. [`wait_any`] passing more than this
@@ -356,6 +366,49 @@ pub fn current_pid() -> u32 {
     unsafe { GetCurrentProcessId() }
 }
 
+/// Open a handle to the process named by `pid` — `OpenProcess`, needed for
+/// `kill <pid>` on a pid a caller only knows numerically (e.g. read back
+/// from `jobs`/`$!`), not one of this crate's own [`SpawnedProcess`] handles
+/// from [`spawn_suspended`]. `desired_access` should be the narrowest set of
+/// rights the caller actually needs — [`PROCESS_TERMINATE`] alone for a
+/// handle that will only ever be passed to [`terminate`], or
+/// `PROCESS_TERMINATE | SYNCHRONIZE` for one that will also be passed to
+/// [`wait`]/[`wait_any`].
+pub fn open_by_pid(pid: u32, desired_access: u32) -> Result<RawHandle, Win32Error> {
+    // SAFETY: `desired_access` is a plain access-rights bitmask, not a
+    // pointer; `inherit_handle = FALSE` (0) is a documented valid input;
+    // `pid` is caller-supplied and `OpenProcess` itself reports an unknown
+    // or inaccessible one as an ordinary `NULL`/`GetLastError` failure, not
+    // undefined behavior.
+    let handle = unsafe { OpenProcess(desired_access, 0, pid) };
+    if handle.is_null() {
+        Err(Win32Error::last())
+    } else {
+        Ok(handle)
+    }
+}
+
+/// Terminate `process` with `exit_code` — `TerminateProcess`, the
+/// single-process counterpart to [`crate::job::terminate`] (which kills
+/// every process in a job at once). Needed for `kill <pid>` against a
+/// process this crate didn't itself spawn into a job — one opened via
+/// [`open_by_pid`] instead.
+///
+/// # Safety
+///
+/// `process` must be a currently-open, valid process handle with the
+/// `PROCESS_TERMINATE` access right.
+pub unsafe fn terminate(process: RawHandle, exit_code: u32) -> Result<(), Win32Error> {
+    // SAFETY: `process` is caller-supplied per this function's own safety
+    // contract; `exit_code` is a plain value, not a pointer.
+    let ok = unsafe { TerminateProcess(process, exit_code) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,6 +520,57 @@ mod tests {
     #[test]
     fn current_pid_is_nonzero() {
         assert_ne!(current_pid(), 0);
+    }
+
+    #[test]
+    fn open_by_pid_then_terminate_kills_a_process_known_only_by_pid() {
+        // The scenario this pair exists for: a pid read back numerically
+        // (e.g. from `jobs`/`$!`), with no `SpawnedProcess` handle in hand —
+        // open a fresh handle from just the pid, terminate through *that*
+        // handle, and confirm the original process handle still reports the
+        // resulting exit code.
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known long-running system command.
+        let spawned =
+            unsafe { spawn_suspended("cmd.exe /c ping -n 30 127.0.0.1 >nul", false, None) }
+                .expect("CreateProcessW should succeed");
+        // SAFETY: `spawned.thread` is freshly created, valid, not yet
+        // resumed.
+        unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
+
+        let opened = open_by_pid(spawned.process_id, PROCESS_TERMINATE | SYNCHRONIZE)
+            .expect("OpenProcess should succeed for a live pid this test itself just started");
+        assert_ne!(
+            opened, spawned.process,
+            "OpenProcess should hand back an independent handle value, not the original one"
+        );
+
+        // SAFETY: `opened` is a freshly opened, valid handle with
+        // PROCESS_TERMINATE.
+        unsafe { terminate(opened, 42) }.expect("TerminateProcess should succeed");
+
+        // SAFETY: `spawned.process` is still a valid handle — terminating
+        // via a *different* handle to the same process doesn't invalidate
+        // it, only the process itself.
+        let exit = unsafe { wait(spawned.process, Some(5_000)) }.unwrap();
+        assert_eq!(exit, Some(42));
+
+        // SAFETY: every handle here is valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(opened).unwrap();
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+        }
+    }
+
+    #[test]
+    fn open_by_pid_fails_for_pid_zero() {
+        // Pid 0 (the System Idle Process) is documented to never be
+        // openable via `OpenProcess` — a stable, deterministic "this pid
+        // does not resolve to an openable process" case to test against,
+        // unlike an arbitrary made-up pid that could coincidentally collide
+        // with something real on a given machine.
+        assert!(open_by_pid(0, PROCESS_TERMINATE).is_err());
     }
 
     #[test]

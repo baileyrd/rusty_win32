@@ -152,8 +152,8 @@ pub use handle::{RawHandle, close, create_pipe, duplicate, set_inheritable};
 pub mod process;
 #[cfg(windows)]
 pub use process::{
-    MAXIMUM_WAIT_OBJECTS, SpawnedProcess, current_pid, environment_block, resume, spawn_suspended,
-    wait, wait_any,
+    MAXIMUM_WAIT_OBJECTS, PROCESS_TERMINATE, SYNCHRONIZE, SpawnedProcess, current_pid,
+    environment_block, open_by_pid, resume, spawn_suspended, terminate, wait, wait_any,
 };
 
 // `job`'s six-item surface (`create`/`assign`/`set_kill_on_close`/
