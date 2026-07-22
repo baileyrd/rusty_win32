@@ -7,6 +7,14 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # This crate's tests spawn real processes and open real console/pipe
+  # handles — Windows handle *values* are small and get reused immediately
+  # after CloseHandle, so running them across cargo test's default multiple
+  # threads lets one test's handle get recycled mid-flight by an unrelated
+  # test in another thread (observed as a sporadic ERROR_INVALID_HANDLE on
+  # an otherwise-correct close/duplicate call). Serializing avoids the race
+  # rather than chasing down which specific pair of tests collided this run.
+  RUST_TEST_THREADS: "1"
 
 jobs:
   windows:
