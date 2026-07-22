@@ -146,7 +146,7 @@ pub use console::{HandlerRoutine, install_ctrl_handler, remove_ctrl_handler};
 #[cfg(windows)]
 pub mod handle;
 #[cfg(windows)]
-pub use handle::{RawHandle, close, create_pipe, duplicate, set_inheritable};
+pub use handle::{RawHandle, close, create_pipe, duplicate, pipe_bytes_available, set_inheritable};
 
 #[cfg(windows)]
 pub mod process;
