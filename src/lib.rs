@@ -112,6 +112,19 @@
 //! `Option<u32>` timeout convention, same exit-code fetch via
 //! `GetExitCodeProcess`), just over a slice of handles instead of one.
 //!
+//! [`path::resolve_command`] (backed by [`path::search_path`], a
+//! `SearchPathW` wrapper) closes a gap the capability assessment
+//! (`docs/CAPABILITY_ASSESSMENT.md`) flagged as this crate's single biggest
+//! remaining *correctness* gap, not merely a nice-to-have: Windows has no
+//! executable bit the way Unix does, so "is `foo` runnable" is answered
+//! entirely by file extension plus the `PATHEXT` environment variable
+//! (`.COM;.EXE;.BAT;.CMD;...`) instead of a `stat` mode check. Without this,
+//! a bare command name (`foo`, as opposed to `foo.exe`) has no primitive to
+//! resolve against on Windows at all. `pathext` is caller-supplied, the same
+//! way `spawn_suspended`'s `environment` parameter is, rather than read from
+//! the real environment out from under a caller tracking its own variable
+//! table.
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or
@@ -157,3 +170,8 @@ pub mod job;
 pub mod time;
 #[cfg(windows)]
 pub use time::{Timespec, now_monotonic, now_realtime};
+
+#[cfg(windows)]
+pub mod path;
+#[cfg(windows)]
+pub use path::{resolve_command, search_path};
