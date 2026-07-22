@@ -138,8 +138,18 @@ pub use handle::{RawHandle, close, create_pipe, duplicate, set_inheritable};
 #[cfg(windows)]
 pub mod process;
 #[cfg(windows)]
-pub use process::{SpawnedProcess, current_pid, resume, spawn_suspended, wait};
+pub use process::{
+    MAXIMUM_WAIT_OBJECTS, SpawnedProcess, current_pid, environment_block, resume, spawn_suspended,
+    wait, wait_any,
+};
 
+// `job`'s six-item surface (`create`/`assign`/`set_kill_on_close`/
+// `clear_kill_on_close`/`terminate`/`process_ids`) is deliberately *not*
+// re-exported at the crate root, unlike the smaller modules above: a job's
+// lifecycle is always used as a cohesive group of calls against the same
+// handle, not as a single flagship function reached in isolation, so
+// flattening all six into the root namespace would add noise without
+// adding ergonomics. Reach it via `rusty_win32::job::*`.
 #[cfg(windows)]
 pub mod job;
 
