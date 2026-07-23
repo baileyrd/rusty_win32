@@ -102,6 +102,7 @@ unsafe extern "system" {
     fn TerminateProcess(process: RawHandle, exit_code: u32) -> i32;
     fn GetProcessId(process: RawHandle) -> u32;
     fn Sleep(milliseconds: u32);
+    fn GetSystemInfo(system_info: *mut SystemInfo);
     fn QueryFullProcessImageNameW(
         process: RawHandle,
         flags: u32,
@@ -199,6 +200,39 @@ struct FileTime {
 }
 const _: () = assert!(core::mem::size_of::<FileTime>() == 8);
 const _: () = assert!(core::mem::align_of::<FileTime>() == 4);
+
+// SYSTEM_INFO: `size_of` 48, `align_of` 8 on x86_64. Verified against
+// mingw-w64's `sysinfoapi.h` the same way as this crate's other structs (a
+// `_Static_assert` probe compiled with `x86_64-w64-mingw32-gcc` against the
+// real header). `dwOemId`'s union collapses to its `wProcessorArchitecture`/
+// `wReserved` members here since [`logical_processor_count`] doesn't read
+// either — only [`SystemInfo::number_of_processors`] is exposed.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct SystemInfo {
+    processor_architecture: u16,
+    reserved: u16,
+    page_size: u32,
+    minimum_application_address: *mut core::ffi::c_void,
+    maximum_application_address: *mut core::ffi::c_void,
+    active_processor_mask: u64,
+    number_of_processors: u32,
+    processor_type: u32,
+    allocation_granularity: u32,
+    processor_level: u16,
+    processor_revision: u16,
+}
+const _: () = assert!(core::mem::size_of::<SystemInfo>() == 48);
+const _: () = assert!(core::mem::align_of::<SystemInfo>() == 8);
+const _: () = assert!(core::mem::offset_of!(SystemInfo, page_size) == 4);
+const _: () = assert!(core::mem::offset_of!(SystemInfo, minimum_application_address) == 8);
+const _: () = assert!(core::mem::offset_of!(SystemInfo, maximum_application_address) == 16);
+const _: () = assert!(core::mem::offset_of!(SystemInfo, active_processor_mask) == 24);
+const _: () = assert!(core::mem::offset_of!(SystemInfo, number_of_processors) == 32);
+const _: () = assert!(core::mem::offset_of!(SystemInfo, processor_type) == 36);
+const _: () = assert!(core::mem::offset_of!(SystemInfo, allocation_granularity) == 40);
+const _: () = assert!(core::mem::offset_of!(SystemInfo, processor_level) == 44);
+const _: () = assert!(core::mem::offset_of!(SystemInfo, processor_revision) == 46);
 
 /// 100ns ticks between the FILETIME epoch (1601-01-01) and the Unix epoch
 /// (1970-01-01) — the same standard conversion constant `time.rs`/`fs.rs` use.
@@ -880,6 +914,19 @@ pub fn sleep_ms(milliseconds: u32) {
     unsafe { Sleep(milliseconds) }
 }
 
+/// The number of logical processors visible to the calling process —
+/// `GetSystemInfo`'s `dwNumberOfProcessors`, the primitive behind an
+/// `nproc`-equivalent builtin. No `Result`: `GetSystemInfo` has no
+/// documented failure mode, matching this crate's already-established
+/// "never fails" pattern (e.g. `GetDriveTypeW`).
+pub fn logical_processor_count() -> u32 {
+    let mut info = SystemInfo::default();
+    // SAFETY: `info` is a valid, correctly-sized out-pointer; `GetSystemInfo`
+    // has no other precondition.
+    unsafe { GetSystemInfo(&mut info) };
+    info.number_of_processors
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1322,6 +1369,14 @@ mod tests {
         assert!(
             start.elapsed().as_millis() >= 50,
             "Sleep should block for at least the requested duration"
+        );
+    }
+
+    #[test]
+    fn logical_processor_count_is_nonzero() {
+        assert!(
+            logical_processor_count() > 0,
+            "every real machine has at least one logical processor"
         );
     }
 }

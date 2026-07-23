@@ -79,6 +79,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `df`-style builtin — another parity-loop find.
 - `process::sleep_ms` (`Sleep`), the direct primitive behind a
   `sleep`/`usleep` builtin — another parity-loop find.
+- `process::logical_processor_count` (`GetSystemInfo`'s
+  `dwNumberOfProcessors`), the primitive behind an `nproc`-equivalent
+  builtin — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
