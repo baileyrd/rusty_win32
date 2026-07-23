@@ -115,6 +115,13 @@ unsafe extern "system" {
     ) -> i32;
     fn SetProcessAffinityMask(process: RawHandle, process_affinity_mask: usize) -> i32;
     fn GetExitCodeThread(thread: RawHandle, exit_code: *mut u32) -> i32;
+    fn GetThreadTimes(
+        thread: RawHandle,
+        creation_time: *mut FileTime,
+        exit_time: *mut FileTime,
+        kernel_time: *mut FileTime,
+        user_time: *mut FileTime,
+    ) -> i32;
     fn QueryFullProcessImageNameW(
         process: RawHandle,
         flags: u32,
@@ -367,6 +374,24 @@ pub struct ProcessTimes {
     pub kernel_time: Timespec,
     /// Total time spent executing in user mode, as an elapsed *duration*
     /// since process creation — not a wall-clock timestamp.
+    pub user_time: Timespec,
+}
+
+/// [`thread_times`]'s result — `GetThreadTimes`, the thread-level
+/// counterpart to [`ProcessTimes`]/[`times`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadTimes {
+    /// When the thread was created — a real wall-clock timestamp.
+    pub creation: Timespec,
+    /// When the thread exited — a real wall-clock timestamp, but only
+    /// meaningful once the thread actually has; Windows reports this as
+    /// zero for a still-running thread, not an error.
+    pub exit: Timespec,
+    /// Total time spent executing in kernel mode, as an elapsed *duration*
+    /// since thread creation — not a wall-clock timestamp.
+    pub kernel_time: Timespec,
+    /// Total time spent executing in user mode, as an elapsed *duration*
+    /// since thread creation — not a wall-clock timestamp.
     pub user_time: Timespec,
 }
 
@@ -1321,6 +1346,33 @@ pub unsafe fn thread_exit_code(thread: RawHandle) -> Result<u32, Win32Error> {
     }
 }
 
+/// CPU-time accounting for `thread` — `GetThreadTimes`, the thread-level
+/// counterpart to [`times`]. `thread` needs
+/// [`THREAD_QUERY_INFORMATION`] (the narrowest right this call requires).
+/// No current `rush` feature asks for this; filed for Win32 parity.
+///
+/// # Safety
+///
+/// `thread` must be a currently-open, valid thread handle.
+pub unsafe fn thread_times(thread: RawHandle) -> Result<ThreadTimes, Win32Error> {
+    let mut creation = FileTime::default();
+    let mut exit = FileTime::default();
+    let mut kernel = FileTime::default();
+    let mut user = FileTime::default();
+    // SAFETY: `thread` is caller-supplied per this function's own safety
+    // contract; all four out-pointers are valid, correctly-sized locals.
+    let ok = unsafe { GetThreadTimes(thread, &mut creation, &mut exit, &mut kernel, &mut user) };
+    if ok == 0 {
+        return Err(Win32Error::last());
+    }
+    Ok(ThreadTimes {
+        creation: filetime_to_timespec(creation),
+        exit: filetime_to_timespec(exit),
+        kernel_time: filetime_to_duration(kernel),
+        user_time: filetime_to_duration(user),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1956,6 +2008,49 @@ mod tests {
         let code = unsafe { thread_exit_code(thread_handle) }
             .expect("GetExitCodeThread should succeed after the thread has exited");
         assert_eq!(code, 7);
+
+        // SAFETY: every handle here is valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(thread_handle).unwrap();
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+        }
+    }
+
+    #[test]
+    fn thread_times_reports_plausible_creation_and_exit_timestamps() {
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known system binary.
+        let spawned = unsafe { spawn_suspended("cmd.exe /c exit 0", false, false, None) }
+            .expect("CreateProcessW should succeed");
+        // SAFETY: `spawned.thread` is freshly created, valid, not yet
+        // resumed.
+        unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
+
+        let thread_handle = open_thread(spawned.thread_id, THREAD_QUERY_INFORMATION)
+            .expect("OpenThread should succeed for a live thread id this test itself just started");
+
+        // Queried before waiting for the exit — `cmd.exe /c exit 0` may
+        // already be done by now, so only `creation`/`kernel_time`/
+        // `user_time` are asserted on here, not `exit`.
+        // SAFETY: `thread_handle` is a valid, currently-open handle.
+        let before = unsafe { thread_times(thread_handle) }.expect("GetThreadTimes should succeed");
+        assert!(
+            before.creation.secs > 1_700_000_000,
+            "creation should be a plausible wall-clock timestamp (after ~2023)"
+        );
+        assert!(before.kernel_time.nanos < 1_000_000_000);
+        assert!(before.user_time.nanos < 1_000_000_000);
+
+        // SAFETY: `spawned.process` is still the same valid handle.
+        unsafe { wait(spawned.process, None) }.unwrap();
+
+        // SAFETY: same valid handle, now that the thread has exited.
+        let after = unsafe { thread_times(thread_handle) }.expect("GetThreadTimes should succeed");
+        assert!(
+            after.exit.secs > 1_700_000_000,
+            "exit should be a plausible wall-clock timestamp once the thread has exited"
+        );
 
         // SAFETY: every handle here is valid and each closed exactly once.
         unsafe {
