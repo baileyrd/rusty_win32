@@ -6,6 +6,26 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #208 — process: add exception-handler hooks (AddVectoredExceptionHandler/SetUnhandledExceptionFilter)
+**2026-07-23** · [#208](https://github.com/baileyrd/rusty_win32/pull/208)
+
+- **Added:** `process::add_vectored_exception_handler`/
+  `remove_vectored_exception_handler` (`AddVectoredExceptionHandler`/
+  `RemoveVectoredExceptionHandler`) and
+  `process::set_unhandled_exception_filter` (`SetUnhandledExceptionFilter`)
+  plus `ExceptionPointers`/`VectoredExceptionHandler`/
+  `TopLevelExceptionFilter`/`EXCEPTION_CONTINUE_EXECUTION`/
+  `EXCEPTION_CONTINUE_SEARCH`/`EXCEPTION_EXECUTE_HANDLER`, closing issue
+  #137 — structured-exception-handling hooks, the closest Windows analog
+  to installing a Unix `SIGSEGV`/`SIGABRT` handler. `EXCEPTION_RECORD`/
+  `CONTEXT` aren't decoded (a variable-length trailing array and a large,
+  architecture-specific register dump respectively) — only the two raw
+  pointers `EXCEPTION_POINTERS` itself carries are exposed. Tested via
+  `RaiseException` with a custom application-defined exception code — a
+  safe, deterministic way to exercise a handler without a real CPU fault.
+  Another round-2 "weak/no clear consumer" item (`gap-analysis.md`); no
+  current `rush` feature asks for this.
+
 ## PR #207 — process: add logical_processor_information (GetLogicalProcessorInformation)
 **2026-07-23** · [#207](https://github.com/baileyrd/rusty_win32/pull/207)
 
