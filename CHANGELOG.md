@@ -96,6 +96,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `MOVEFILE_COPY_ALLOWED`, the primitive behind an `mv` builtin (covering
   cross-volume moves, unlike `std::fs::rename` on Windows) — another
   parity-loop find.
+- `fs::delete_file` (`DeleteFileW`), the primitive behind an `rm` builtin —
+  another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
