@@ -101,6 +101,7 @@ unsafe extern "system" {
         last_write_time: *mut FileTime,
     ) -> i32;
     fn RegFlushKey(key: HKey) -> i32;
+    fn RegDeleteTreeW(key: HKey, sub_key: *const u16) -> i32;
 }
 
 // FILETIME: `size_of` 8, `align_of` 4 on x86_64 — mirrors `time.rs`'s
@@ -984,6 +985,31 @@ pub unsafe fn flush_key(key: HKey) -> Result<(), crate::error::Win32Error> {
     }
 }
 
+/// Recursively delete `subkey` (under `parent`) and everything beneath
+/// it — values, subkeys, and their own subkeys, all the way down —
+/// `RegDeleteTreeW`. [`delete_key`]'s leaf-only restriction (it refuses a
+/// subkey that still has children) forces a hand-rolled
+/// enumerate-and-recurse loop without this; `RegDeleteTreeW` does that
+/// walk internally instead.
+///
+/// # Safety
+///
+/// `parent` must be a currently-valid `HKey` — one of the predefined
+/// roots in this module, or a key [`open_key`]/[`create_key`] previously
+/// returned that hasn't been closed yet.
+pub unsafe fn delete_tree(parent: HKey, subkey: &str) -> Result<(), crate::error::Win32Error> {
+    let wide: Vec<u16> = subkey.encode_utf16().chain(core::iter::once(0)).collect();
+    // SAFETY: `parent` is caller-supplied per this function's own safety
+    // contract; `wide` is a valid, NUL-terminated UTF-16 string live for
+    // the whole call.
+    let status = unsafe { RegDeleteTreeW(parent, wide.as_ptr()) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(crate::error::Win32Error::from_raw(status as u32))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1581,5 +1607,56 @@ mod tests {
         // SAFETY: `HKEY_CURRENT_USER` is the same predefined root.
         unsafe { delete_key(HKEY_CURRENT_USER, subkey.as_str(), 0) }
             .expect("RegDeleteKeyExW should succeed");
+    }
+
+    #[test]
+    fn delete_tree_removes_a_subkey_and_its_own_child() {
+        let parent_subkey = format!(
+            "Software\\rusty_win32_registry_test_delete_tree_{}",
+            std::process::id()
+        );
+        // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid root.
+        let (parent, _disposition) =
+            unsafe { create_key(HKEY_CURRENT_USER, parent_subkey.as_str(), KEY_ALL_ACCESS) }
+                .expect("RegCreateKeyExW should succeed");
+        // SAFETY: `parent` was just created above, opened with
+        // `KEY_ALL_ACCESS`, and stays open for this whole test.
+        unsafe { set_value(parent, "a_value", &RegistryValue::Dword(1)) }
+            .expect("RegSetValueExW should succeed");
+        // SAFETY: same as above.
+        let (child, _disposition) = unsafe { create_key(parent, "a_child", KEY_ALL_ACCESS) }
+            .expect("RegCreateKeyExW should succeed");
+        // SAFETY: `child` was just created above and not yet closed —
+        // `delete_key` on `parent` alone would refuse to remove it while
+        // this child still exists, which is exactly the restriction
+        // `delete_tree` doesn't have.
+        unsafe { close_key(child) }.expect("RegCloseKey should succeed");
+        // SAFETY: `parent` is still the same valid, currently-open
+        // handle.
+        unsafe { close_key(parent) }.expect("RegCloseKey should succeed");
+
+        // SAFETY: `HKEY_CURRENT_USER` is the same predefined root; this
+        // is the operation under test.
+        unsafe { delete_tree(HKEY_CURRENT_USER, parent_subkey.as_str()) }
+            .expect("RegDeleteTreeW should succeed");
+
+        // SAFETY: same predefined root; confirming the whole subtree —
+        // parent included — is actually gone, not just its child.
+        let err = unsafe { open_key(HKEY_CURRENT_USER, parent_subkey.as_str(), KEY_READ) }
+            .expect_err("RegOpenKeyExW should fail: delete_tree just removed this whole subtree");
+        assert_eq!(err, crate::error::Win32Error::ERROR_FILE_NOT_FOUND);
+    }
+
+    #[test]
+    fn delete_tree_fails_for_a_nonexistent_subkey() {
+        // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid root.
+        let err = unsafe {
+            delete_tree(
+                HKEY_CURRENT_USER,
+                "Software\\ThisSubkeyDefinitelyDoesNotExist12345",
+            )
+        }
+        .expect_err("RegDeleteTreeW should fail for a nonexistent subkey");
+        assert_eq!(err, crate::error::Win32Error::ERROR_FILE_NOT_FOUND);
     }
 }
