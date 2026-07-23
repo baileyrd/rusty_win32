@@ -251,6 +251,7 @@ const _: () = assert!(core::mem::align_of::<JobObjectAssociateCompletionPort>() 
 unsafe extern "system" {
     fn CreateJobObjectW(job_attributes: *const core::ffi::c_void, name: *const u16) -> RawHandle;
     fn AssignProcessToJobObject(job: RawHandle, process: RawHandle) -> i32;
+    fn IsProcessInJob(process: RawHandle, job: RawHandle, result: *mut i32) -> i32;
     fn TerminateJobObject(job: RawHandle, exit_code: u32) -> i32;
     fn SetInformationJobObject(
         job: RawHandle,
@@ -379,6 +380,36 @@ pub unsafe fn assign(job: RawHandle, process: RawHandle) -> Result<(), Win32Erro
         Err(Win32Error::last())
     } else {
         Ok(())
+    }
+}
+
+/// Check whether `process` already belongs to `job` — or, with `job: None`,
+/// whether it belongs to *any* job at all (`IsProcessInJob`'s own
+/// documented `NULL`-means-any-job convention). Windows automatically nests
+/// every child a job member spawns into that same job, and some
+/// environments (e.g. GitHub Actions' Windows runners, which wrap each
+/// step's whole process tree in an ambient job for orphan cleanup) start a
+/// process already job-scoped before this crate ever sees it — checking
+/// this first avoids a surprise [`assign`] failure (a process can't be
+/// reassigned to a different job unless its current one was created with
+/// `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK`/`BREAKAWAY_OK`, which this crate
+/// doesn't set).
+///
+/// # Safety
+///
+/// `process` must be a currently-open, valid process handle; `job`, if
+/// given, must be a currently-open, valid Job Object handle.
+pub unsafe fn is_in_job(process: RawHandle, job: Option<RawHandle>) -> Result<bool, Win32Error> {
+    let mut result: i32 = 0;
+    // SAFETY: `process` is caller-supplied per this function's own safety
+    // contract; `job` is either NULL (documented as "any job") or a
+    // caller-supplied, valid handle per the same contract; `result` is a
+    // valid out-pointer.
+    let ok = unsafe { IsProcessInJob(process, job.unwrap_or(core::ptr::null_mut()), &mut result) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(result != 0)
     }
 }
 
@@ -877,6 +908,53 @@ mod tests {
         unsafe {
             crate::handle::close(spawned.process).unwrap();
             crate::handle::close(spawned.thread).unwrap();
+        }
+    }
+
+    #[test]
+    fn is_in_job_reports_true_only_after_assign() {
+        let job = create().expect("CreateJobObjectW should succeed");
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known system binary.
+        let spawned = unsafe { process::spawn_suspended("cmd.exe /c exit 0", false, false, None) }
+            .expect("CreateProcessW should succeed");
+
+        // Checked against this specific job (not `None`/"any job") so this
+        // assertion holds even under an ambient job wrapping the whole test
+        // process tree (e.g. GitHub Actions' Windows runners — see this
+        // function's own doc comment).
+        // SAFETY: `spawned.process`/`job` are both freshly created, valid
+        // handles.
+        let before = unsafe { is_in_job(spawned.process, Some(job)) }
+            .expect("IsProcessInJob should succeed");
+        assert!(
+            !before,
+            "a process shouldn't be in a job it hasn't been assigned to yet"
+        );
+
+        // SAFETY: `job`/`spawned.process` are both freshly created, valid
+        // handles; assignment happens before `resume`.
+        unsafe { assign(job, spawned.process).expect("AssignProcessToJobObject should succeed") };
+
+        // SAFETY: same handles, still valid.
+        let after = unsafe { is_in_job(spawned.process, Some(job)) }
+            .expect("IsProcessInJob should succeed");
+        assert!(
+            after,
+            "the process should report membership right after assign"
+        );
+
+        // SAFETY: `spawned.thread` is freshly created, valid, not yet
+        // resumed.
+        unsafe { process::resume(spawned.thread).expect("ResumeThread should succeed") };
+        // SAFETY: `spawned.process` is a valid, currently-open handle.
+        unsafe { process::wait(spawned.process, None) }.unwrap();
+
+        // SAFETY: every handle here is valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+            crate::handle::close(job).unwrap();
         }
     }
 
