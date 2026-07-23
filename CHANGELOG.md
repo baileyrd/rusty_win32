@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `security::lookup_account_sid`/`security::lookup_account_name`
+  (`LookupAccountSidW`/`LookupAccountNameW`) plus `AccountName`/
+  `SidNameUse`/`SidBuf` — SID↔name resolution, turning an owner/ACE SID
+  into a `"DOMAIN\name"` display string and a name into the SID
+  `build_trustee_with_sid`/`build_acl` need.
 - `security::build_trustee_with_sid`/`security::build_trustee_with_name`
   (`BuildTrusteeWithSidW`/`BuildTrusteeWithNameW`) — wrap a `PSID` or a
   wide-string name into the `Trustee` shape `build_acl`'s entries need.
