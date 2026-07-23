@@ -233,7 +233,18 @@ unsafe extern "system" {
         new_file_name: *const u16,
         fail_if_exists: i32,
     ) -> i32;
+    fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
 }
+
+/// `MoveFileExW`'s `dwFlags` bit: overwrite `to` if it already exists
+/// (`MoveFileExW`'s own default refuses to, matching `rename`'s POSIX
+/// semantics being the exception, not the rule, on Windows).
+pub const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+/// `MoveFileExW`'s `dwFlags` bit: fall back to a copy-then-delete if `from`
+/// and `to` are on different volumes — plain `MoveFileW`/a rename-only move
+/// fails across volumes; this is the flag that makes `MoveFileExW` succeed
+/// there instead, unlike `std::fs::rename` on Windows, which doesn't.
+pub const MOVEFILE_COPY_ALLOWED: u32 = 0x2;
 
 // WIN32_FIND_DATAW: `size_of` 592, `align_of` 4 on x86_64. Verified against
 // mingw-w64's `minwinbase.h` the same way as every other struct in this
@@ -397,6 +408,26 @@ pub fn copy_file(from: &str, to: &str, fail_if_exists: bool) -> Result<(), Win32
             i32::from(fail_if_exists),
         )
     };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
+/// Move (rename) `from` to `to` — `MoveFileExW`, the primitive behind an
+/// `mv` builtin. `flags` is the raw `MOVEFILE_*` bitmask above (e.g.
+/// [`MOVEFILE_REPLACE_EXISTING`]/[`MOVEFILE_COPY_ALLOWED`]) — this function
+/// is a thin, policy-free wrapper, the same as this crate's other raw
+/// bitmask parameters. Unlike `std::fs::rename` on Windows, passing
+/// `MOVEFILE_COPY_ALLOWED` lets this succeed across volumes (falling back
+/// to a copy-then-delete internally) rather than failing.
+pub fn move_file(from: &str, to: &str, flags: u32) -> Result<(), Win32Error> {
+    let from_wide: Vec<u16> = from.encode_utf16().chain(core::iter::once(0)).collect();
+    let to_wide: Vec<u16> = to.encode_utf16().chain(core::iter::once(0)).collect();
+    // SAFETY: `from_wide`/`to_wide` are valid, NUL-terminated UTF-16 strings;
+    // `flags` is a plain bitmask, not a pointer.
+    let ok = unsafe { MoveFileExW(from_wide.as_ptr(), to_wide.as_ptr(), flags) };
     if ok == 0 {
         Err(Win32Error::last())
     } else {
@@ -894,6 +925,50 @@ mod tests {
 
         let err = copy_file(from.to_str().unwrap(), to.to_str().unwrap(), true).unwrap_err();
         assert_eq!(err, Win32Error::ERROR_FILE_EXISTS);
+
+        std::fs::remove_dir_all(&dir).expect("cleaning up the test directory should succeed");
+    }
+
+    #[test]
+    fn move_file_renames_the_file() {
+        let dir = std::env::temp_dir().join("rusty_win32_move_file_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).expect("creating the test directory should succeed");
+        let from = dir.join("source.txt");
+        let to = dir.join("dest.txt");
+        std::fs::write(&from, b"hello move").expect("writing the source file should succeed");
+
+        move_file(from.to_str().unwrap(), to.to_str().unwrap(), 0)
+            .expect("MoveFileExW should succeed");
+
+        assert!(!from.exists(), "the source path should no longer exist");
+        let moved = std::fs::read(&to).expect("the destination file should exist and be readable");
+        assert_eq!(moved, b"hello move");
+
+        std::fs::remove_dir_all(&dir).expect("cleaning up the test directory should succeed");
+    }
+
+    #[test]
+    fn move_file_fails_without_replace_existing_when_destination_already_exists() {
+        let dir = std::env::temp_dir().join("rusty_win32_move_file_exists_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).expect("creating the test directory should succeed");
+        let from = dir.join("source.txt");
+        let to = dir.join("dest.txt");
+        std::fs::write(&from, b"hello").expect("writing the source file should succeed");
+        std::fs::write(&to, b"already here").expect("writing the destination file should succeed");
+
+        let err = move_file(from.to_str().unwrap(), to.to_str().unwrap(), 0).unwrap_err();
+        assert_eq!(err, Win32Error::ERROR_ALREADY_EXISTS);
+
+        move_file(
+            from.to_str().unwrap(),
+            to.to_str().unwrap(),
+            MOVEFILE_REPLACE_EXISTING,
+        )
+        .expect("MoveFileExW should succeed with MOVEFILE_REPLACE_EXISTING");
+        let moved = std::fs::read(&to).expect("the destination file should exist and be readable");
+        assert_eq!(moved, b"hello");
 
         std::fs::remove_dir_all(&dir).expect("cleaning up the test directory should succeed");
     }

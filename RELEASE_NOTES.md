@@ -6,6 +6,16 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #109 — fs: add move_file (MoveFileExW)
+**2026-07-23** · [#109](https://github.com/baileyrd/rusty_win32/pull/109)
+
+- **Added:** `fs::move_file` (`MoveFileExW`) plus the
+  `MOVEFILE_REPLACE_EXISTING`/`MOVEFILE_COPY_ALLOWED` flag constants,
+  closing issue #76 from the parity-loop sweep — the primitive behind an
+  `mv` builtin. `MOVEFILE_COPY_ALLOWED` also covers cross-volume moves,
+  which `std::fs::rename` doesn't on Windows. Filed for tracking, not
+  urgency: `rush` has no `mv` builtin today.
+
 ## PR #108 — fs: add copy_file (CopyFileW)
 **2026-07-23** · [#108](https://github.com/baileyrd/rusty_win32/pull/108)
 
