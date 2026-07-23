@@ -70,6 +70,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   queued keystrokes (e.g. after Ctrl-C) — another parity-loop find.
 - `console::pending_input_events` (`GetNumberOfConsoleInputEvents`), a
   non-blocking queued-input-depth check — another parity-loop find.
+- `pipe::disconnect_server` (`DisconnectNamedPipe`), letting a served pipe
+  instance be reset and reused for a second client instead of requiring a
+  fresh server — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

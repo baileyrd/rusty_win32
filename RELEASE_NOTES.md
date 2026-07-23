@@ -6,6 +6,15 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #100 — pipe: add disconnect_server (DisconnectNamedPipe)
+**2026-07-23** · [#100](https://github.com/baileyrd/rusty_win32/pull/100)
+
+- **Added:** `pipe::disconnect_server` (`DisconnectNamedPipe`), closing
+  issue #67 from the parity-loop sweep. `pipe::create_server`/
+  `connect_server` (issue #39) had no way to disconnect and reset a served
+  pipe instance for reuse with the next client — a served instance could
+  only ever be used once before the whole server had to be recreated.
+
 ## PR #99 — console: add pending_input_events (GetNumberOfConsoleInputEvents)
 **2026-07-23** · [#99](https://github.com/baileyrd/rusty_win32/pull/99)
 
