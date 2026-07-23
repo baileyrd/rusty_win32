@@ -72,7 +72,24 @@ unsafe extern "system" {
         name: *const u16,
     ) -> RawHandle;
     fn ReleaseSemaphore(semaphore: RawHandle, release_count: i32, previous_count: *mut i32) -> i32;
+    fn WaitForSingleObjectEx(handle: RawHandle, milliseconds: u32, alertable: i32) -> u32;
+    fn WaitForMultipleObjectsEx(
+        count: u32,
+        handles: *const RawHandle,
+        wait_all: i32,
+        milliseconds: u32,
+        alertable: i32,
+    ) -> u32;
 }
+
+/// `INFINITE` — `WaitForSingleObjectEx`/`WaitForMultipleObjectsEx`'s
+/// sentinel `dwMilliseconds` value meaning "never time out."
+const INFINITE: u32 = 0xFFFF_FFFF;
+const WAIT_OBJECT_0: u32 = 0;
+const WAIT_ABANDONED_0: u32 = 0x0000_0080;
+const WAIT_TIMEOUT: u32 = 258;
+const WAIT_IO_COMPLETION: u32 = 0x0000_00C0;
+const WAIT_FAILED: u32 = 0xFFFF_FFFF;
 
 /// `GetStdHandle`/`SetStdHandle`'s `nStdHandle` slot selector for the
 /// process's standard input. Defined as `(DWORD)-10` — a negative index
@@ -407,6 +424,111 @@ pub unsafe fn release_semaphore(
     }
 }
 
+/// [`wait_single_ex`]/[`wait_multiple_ex`]'s outcome. `Signaled`/
+/// `Abandoned` carry the index of the handle that woke the wait (always
+/// `0` for [`wait_single_ex`]; the position within the passed slice for
+/// [`wait_multiple_ex`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitResult {
+    /// The handle at this index became signaled normally.
+    Signaled(usize),
+    /// The handle at this index was a mutex whose previous owner
+    /// terminated without releasing it — still counts as acquired, but
+    /// the caller should treat any state it protected as possibly
+    /// inconsistent, same as Windows' own documented `WAIT_ABANDONED`
+    /// semantics.
+    Abandoned(usize),
+    /// No handle became signaled before `timeout_ms` elapsed.
+    TimedOut,
+    /// The wait returned early because an asynchronous procedure call
+    /// (APC) was queued to this thread and `alertable` was `true` — no
+    /// handle was signaled.
+    IoCompletion,
+}
+
+/// Alertable-wait variant of [`crate::console::wait_readable`]'s
+/// `WaitForSingleObject` — `WaitForSingleObjectEx`. Adds `alertable`,
+/// which lets the wait return early (reporting
+/// [`WaitResult::IoCompletion`]) if an APC is queued to this thread while
+/// waiting; pass `false` to behave identically to the non-`Ex` wait. No
+/// current `rush` feature uses APCs, so `alertable: true` has no realistic
+/// use yet — filed for Win32 parity.
+///
+/// # Safety
+///
+/// `handle` must be a currently-open, valid, waitable handle.
+pub unsafe fn wait_single_ex(
+    handle: RawHandle,
+    timeout_ms: Option<u32>,
+    alertable: bool,
+) -> Result<WaitResult, Win32Error> {
+    // SAFETY: `handle` is caller-supplied per this function's own safety
+    // contract; the other two parameters are plain values, not pointers.
+    let result = unsafe {
+        WaitForSingleObjectEx(handle, timeout_ms.unwrap_or(INFINITE), i32::from(alertable))
+    };
+    match result {
+        WAIT_OBJECT_0 => Ok(WaitResult::Signaled(0)),
+        WAIT_ABANDONED_0 => Ok(WaitResult::Abandoned(0)),
+        WAIT_TIMEOUT => Ok(WaitResult::TimedOut),
+        WAIT_IO_COMPLETION => Ok(WaitResult::IoCompletion),
+        _ => Err(Win32Error::last()),
+    }
+}
+
+/// Alertable-wait variant of [`crate::process::wait_any`]'s
+/// `WaitForMultipleObjects` — `WaitForMultipleObjectsEx`. `wait_all`
+/// selects between "any one of `handles`" (`false`) and "every handle in
+/// `handles`" (`true`) becoming signaled; `alertable` is the same
+/// APC-wakeup opt-in as [`wait_single_ex`]. Unlike `wait_any` (scoped to
+/// process handles, which are never abandoned), this generic wait also
+/// reports [`WaitResult::Abandoned`] for a mutex whose owner terminated
+/// without releasing it.
+///
+/// `handles` must be non-empty and no longer than
+/// [`crate::process::MAXIMUM_WAIT_OBJECTS`] — `WaitForMultipleObjectsEx`'s
+/// own documented limit; passing more (or zero) reports
+/// [`Win32Error::ERROR_INVALID_PARAMETER`], the same failure the raw call
+/// itself would report.
+///
+/// # Safety
+///
+/// Every handle in `handles` must be currently-open and valid.
+pub unsafe fn wait_multiple_ex(
+    handles: &[RawHandle],
+    wait_all: bool,
+    timeout_ms: Option<u32>,
+    alertable: bool,
+) -> Result<WaitResult, Win32Error> {
+    // SAFETY: `handles` is a caller-supplied slice of valid handles per
+    // this function's own safety contract; `handles.as_ptr()`/`.len()`
+    // describe that same slice, a valid input `WaitForMultipleObjectsEx`
+    // documents (including reporting `ERROR_INVALID_PARAMETER` itself for
+    // an empty or oversized one, rather than this wrapper pre-checking).
+    let result = unsafe {
+        WaitForMultipleObjectsEx(
+            handles.len() as u32,
+            handles.as_ptr(),
+            i32::from(wait_all),
+            timeout_ms.unwrap_or(INFINITE),
+            i32::from(alertable),
+        )
+    };
+    match result {
+        WAIT_TIMEOUT => Ok(WaitResult::TimedOut),
+        WAIT_IO_COMPLETION => Ok(WaitResult::IoCompletion),
+        WAIT_FAILED => Err(Win32Error::last()),
+        index if (index as usize) < handles.len() => Ok(WaitResult::Signaled(index as usize)),
+        index
+            if index >= WAIT_ABANDONED_0
+                && ((index - WAIT_ABANDONED_0) as usize) < handles.len() =>
+        {
+            Ok(WaitResult::Abandoned((index - WAIT_ABANDONED_0) as usize))
+        }
+        _ => Err(Win32Error::last()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,5 +796,48 @@ mod tests {
         // SAFETY: `semaphore` is still a valid, currently-open handle,
         // closed exactly once and not used again after this.
         unsafe { close(semaphore).unwrap() };
+    }
+
+    #[test]
+    fn wait_single_ex_reports_signaled_then_timed_out() {
+        let semaphore = create_semaphore(None, 1, 1).expect("CreateSemaphoreW should succeed");
+
+        // SAFETY: `semaphore` is a freshly created, valid, waitable handle
+        // with an initial count of 1.
+        let result = unsafe { wait_single_ex(semaphore, Some(0), false) }
+            .expect("WaitForSingleObjectEx should succeed acquiring a non-zero-count semaphore");
+        assert_eq!(result, WaitResult::Signaled(0));
+
+        // The count is now 0 — a second immediate wait should time out.
+        // SAFETY: same handle.
+        let result = unsafe { wait_single_ex(semaphore, Some(0), false) }
+            .expect("WaitForSingleObjectEx should succeed (report a timeout, not fail)");
+        assert_eq!(result, WaitResult::TimedOut);
+
+        // SAFETY: `semaphore` is still a valid, currently-open handle,
+        // closed exactly once and not used again after this.
+        unsafe { close(semaphore).unwrap() };
+    }
+
+    #[test]
+    fn wait_multiple_ex_reports_the_signaled_index() {
+        let first = create_semaphore(None, 0, 1).expect("CreateSemaphoreW should succeed");
+        let second = create_semaphore(None, 1, 1).expect("CreateSemaphoreW should succeed");
+
+        // SAFETY: both handles are freshly created and valid; only
+        // `second` starts with a non-zero count.
+        let result = unsafe { wait_multiple_ex(&[first, second], false, Some(0), false) }
+            .expect("WaitForMultipleObjectsEx should succeed");
+        assert_eq!(
+            result,
+            WaitResult::Signaled(1),
+            "only the second handle (index 1) has a non-zero count"
+        );
+
+        // SAFETY: both handles are still valid, each closed exactly once.
+        unsafe {
+            close(first).unwrap();
+            close(second).unwrap();
+        }
     }
 }

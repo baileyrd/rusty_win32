@@ -135,6 +135,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `handle::create_semaphore`/`handle::release_semaphore`
   (`CreateSemaphoreW`/`ReleaseSemaphore`), a counting semaphore alongside
   the already-wrapped mutex — another round-2 item.
+- `handle::wait_single_ex`/`handle::wait_multiple_ex`
+  (`WaitForSingleObjectEx`/`WaitForMultipleObjectsEx`) plus `WaitResult`,
+  alertable-wait variants of the plain waits already used throughout this
+  crate — another round-2 item.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

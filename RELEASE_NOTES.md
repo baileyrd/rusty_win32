@@ -6,6 +6,20 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #195 — handle: add wait_single_ex/wait_multiple_ex (WaitForSingleObjectEx/WaitForMultipleObjectsEx)
+**2026-07-23** · [#195](https://github.com/baileyrd/rusty_win32/pull/195)
+
+- **Added:** `handle::wait_single_ex`/`handle::wait_multiple_ex` plus a new
+  `WaitResult` enum (`Signaled`/`Abandoned`/`TimedOut`/`IoCompletion`),
+  closing issue #124 — alertable-wait variants of the plain waits already
+  used throughout this crate (`console::wait_readable`,
+  `process::wait`/`wait_any`), adding `alertable` for APC wakeups. Unlike
+  `process::wait_any` (scoped to process handles, which are never
+  abandoned), this generic pair also reports `WaitResult::Abandoned` for a
+  mutex whose owner terminated without releasing it. Another round-2
+  "weak/no clear consumer" item (`gap-analysis.md`); no current `rush`
+  feature uses APCs.
+
 ## PR #194 — handle: add create_semaphore/release_semaphore (CreateSemaphoreW/ReleaseSemaphore)
 **2026-07-23** · [#194](https://github.com/baileyrd/rusty_win32/pull/194)
 
