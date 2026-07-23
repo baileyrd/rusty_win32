@@ -47,6 +47,14 @@ unsafe extern "system" {
         result: *mut HKey,
         disposition: *mut u32,
     ) -> i32;
+    fn RegQueryValueExW(
+        key: HKey,
+        value_name: *const u16,
+        reserved: *mut u32,
+        value_type: *mut u32,
+        data: *mut u8,
+        data_size: *mut u32,
+    ) -> i32;
 }
 
 /// `RegCreateKeyExW`'s `dwOptions`: an ordinary, disk-persisted key —
@@ -213,6 +221,173 @@ pub unsafe fn create_key(
     Ok((result, disposition))
 }
 
+/// A registry value's data, decoded per its `dwType` — the seven kinds
+/// this crate covers (`REG_LINK`/`REG_RESOURCE_LIST`/etc. are out of
+/// scope; a symbolic-key-link and hardware-resource-descriptor format
+/// respectively, neither meaningful outside their own narrow subsystems).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RegistryValue {
+    /// `REG_NONE` — no defined type, or a genuinely empty value.
+    None,
+    /// `REG_SZ` — an ordinary NUL-terminated string.
+    Sz(alloc::string::String),
+    /// `REG_EXPAND_SZ` — a string containing unexpanded `%ENVVAR%`
+    /// references (e.g. `%SystemRoot%\system32`); expanding it is the
+    /// caller's job (`ExpandEnvironmentStringsW`, out of this issue's
+    /// scope), not this function's — it hands back the raw text exactly
+    /// as stored, same as `REG_SZ`.
+    ExpandSz(alloc::string::String),
+    /// `REG_DWORD` — a 32-bit integer.
+    Dword(u32),
+    /// `REG_QWORD` — a 64-bit integer.
+    Qword(u64),
+    /// `REG_BINARY` — an opaque byte blob with no further structure this
+    /// crate decodes.
+    Binary(Vec<u8>),
+    /// `REG_MULTI_SZ` — a list of strings (the on-disk encoding is a
+    /// sequence of NUL-terminated UTF-16 strings, itself terminated by an
+    /// extra NUL; already split apart here).
+    MultiSz(Vec<alloc::string::String>),
+}
+
+/// `RegQueryValueExW`'s `dwType` out-values this crate decodes into
+/// [`RegistryValue`] variants — verified against mingw-w64's own
+/// `winnt.h` macros with a compiled `_Static_assert` probe. Anything else
+/// (`REG_LINK`, `REG_RESOURCE_LIST`, …) falls back to
+/// [`RegistryValue::None`] rather than failing outright, since a caller
+/// asking for an ordinary value's data shouldn't have to know about every
+/// obscure type up front.
+const REG_SZ: u32 = 1;
+const REG_EXPAND_SZ: u32 = 2;
+const REG_BINARY: u32 = 3;
+const REG_DWORD: u32 = 4;
+const REG_MULTI_SZ: u32 = 7;
+const REG_QWORD: u32 = 11;
+
+fn decode_wide_string(buf: &[u8]) -> alloc::string::String {
+    let mut units: Vec<u16> = buf
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    // A registry `REG_SZ`/`REG_EXPAND_SZ` value is *usually* stored with a
+    // trailing NUL folded into its byte count, but the API docs
+    // explicitly warn this isn't guaranteed — strip one if present rather
+    // than assuming either way.
+    if units.last() == Some(&0) {
+        units.pop();
+    }
+    alloc::string::String::from_utf16_lossy(&units)
+}
+
+fn decode_multi_sz(buf: &[u8]) -> Vec<alloc::string::String> {
+    let units: Vec<u16> = buf
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let mut strings = Vec::new();
+    let mut start = 0;
+    for (i, &unit) in units.iter().enumerate() {
+        if unit == 0 {
+            // A run of length zero is either two adjacent NULs (an empty
+            // string genuinely stored in the list) or the final
+            // terminating NUL right after the last real string's own —
+            // either way, `REG_MULTI_SZ`'s own double-NUL end marker
+            // means this loop should stop adding entries once it sees
+            // one, not emit a trailing empty string for it.
+            if i > start {
+                strings.push(alloc::string::String::from_utf16_lossy(&units[start..i]));
+            }
+            start = i + 1;
+        }
+    }
+    strings
+}
+
+fn decode_u32_le(buf: &[u8]) -> u32 {
+    let mut bytes = [0u8; 4];
+    let n = buf.len().min(4);
+    bytes[..n].copy_from_slice(&buf[..n]);
+    u32::from_le_bytes(bytes)
+}
+
+fn decode_u64_le(buf: &[u8]) -> u64 {
+    let mut bytes = [0u8; 8];
+    let n = buf.len().min(8);
+    bytes[..n].copy_from_slice(&buf[..n]);
+    u64::from_le_bytes(bytes)
+}
+
+/// Read `name`'s value data from `key` — `RegQueryValueExW`, decoded into
+/// a [`RegistryValue`] rather than a raw byte blob plus a separate type
+/// code. Uses the query-size-then-allocate idiom this crate already uses
+/// elsewhere (`path::search_path`, `fs::final_path`): a first call with a
+/// null data pointer reports the exact required size (and the value's
+/// type) without needing to guess a starting buffer size, then a second
+/// call actually reads the data into a correctly-sized buffer.
+///
+/// # Safety
+///
+/// `key` must be a currently-valid `HKey` — one of the predefined roots
+/// in this module, or a key [`open_key`]/[`create_key`] previously
+/// returned that hasn't been closed yet.
+pub unsafe fn query_value(
+    key: HKey,
+    name: &str,
+) -> Result<RegistryValue, crate::error::Win32Error> {
+    let wide_name: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+
+    let mut value_type: u32 = 0;
+    let mut size: u32 = 0;
+    // SAFETY: `key` is caller-supplied per this function's own safety
+    // contract; `wide_name` is a valid, NUL-terminated UTF-16 string live
+    // for the whole call; `value_type`/`size` are valid out-pointers. A
+    // null `lpData` with a non-null `lpcbData` is documented to report
+    // just the type and required size, without touching any data buffer.
+    let status = unsafe {
+        RegQueryValueExW(
+            key,
+            wide_name.as_ptr(),
+            core::ptr::null_mut(),
+            &mut value_type,
+            core::ptr::null_mut(),
+            &mut size,
+        )
+    };
+    if status != 0 {
+        return Err(crate::error::Win32Error::from_raw(status as u32));
+    }
+
+    let mut buf: Vec<u8> = alloc::vec![0u8; size as usize];
+    let mut actual_size = size;
+    // SAFETY: `key`/`wide_name` as above; `buf` is a valid,
+    // `size`-byte writable buffer matched by `actual_size` naming its
+    // exact length; `value_type`/`actual_size` are valid out-pointers.
+    let status = unsafe {
+        RegQueryValueExW(
+            key,
+            wide_name.as_ptr(),
+            core::ptr::null_mut(),
+            &mut value_type,
+            buf.as_mut_ptr(),
+            &mut actual_size,
+        )
+    };
+    if status != 0 {
+        return Err(crate::error::Win32Error::from_raw(status as u32));
+    }
+    buf.truncate(actual_size as usize);
+
+    Ok(match value_type {
+        REG_SZ => RegistryValue::Sz(decode_wide_string(&buf)),
+        REG_EXPAND_SZ => RegistryValue::ExpandSz(decode_wide_string(&buf)),
+        REG_DWORD => RegistryValue::Dword(decode_u32_le(&buf)),
+        REG_QWORD => RegistryValue::Qword(decode_u64_le(&buf)),
+        REG_MULTI_SZ => RegistryValue::MultiSz(decode_multi_sz(&buf)),
+        REG_BINARY => RegistryValue::Binary(buf),
+        _ => RegistryValue::None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,5 +494,61 @@ mod tests {
         assert_eq!(second_disposition, KeyDisposition::OpenedExistingKey);
         // SAFETY: `second` was just opened above and not yet closed.
         unsafe { close_key(second) }.expect("RegCloseKey should succeed");
+    }
+
+    /// Every value read below lives under this exact, well-documented
+    /// key — present on every Windows 10/11/Server install since these
+    /// values were introduced (Windows 10, 2015), long before this
+    /// crate's own `windows-latest` CI target existed.
+    const CURRENT_VERSION_KEY: &str = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
+
+    #[test]
+    fn query_value_reads_a_well_known_reg_sz_value() {
+        // SAFETY: `HKEY_LOCAL_MACHINE` is a predefined, always-valid root.
+        let key = unsafe { open_key(HKEY_LOCAL_MACHINE, CURRENT_VERSION_KEY, KEY_READ) }
+            .expect("RegOpenKeyExW should succeed for a well-known, always-present subkey");
+        // SAFETY: `key` was just opened above and stays open for this
+        // whole call.
+        let value = unsafe { query_value(key, "ProductName") }
+            .expect("RegQueryValueExW should succeed reading a well-known REG_SZ value");
+        match value {
+            RegistryValue::Sz(s) => assert!(!s.is_empty(), "ProductName should be non-empty"),
+            other => panic!("expected RegistryValue::Sz, got {other:?}"),
+        }
+        // SAFETY: `key` is still the same valid, currently-open handle.
+        unsafe { close_key(key) }.expect("RegCloseKey should succeed");
+    }
+
+    #[test]
+    fn query_value_reads_a_well_known_reg_dword_value() {
+        // SAFETY: `HKEY_LOCAL_MACHINE` is a predefined, always-valid root.
+        let key = unsafe { open_key(HKEY_LOCAL_MACHINE, CURRENT_VERSION_KEY, KEY_READ) }
+            .expect("RegOpenKeyExW should succeed for a well-known, always-present subkey");
+        // SAFETY: `key` was just opened above and stays open for this
+        // whole call.
+        let value = unsafe { query_value(key, "CurrentMajorVersionNumber") }
+            .expect("RegQueryValueExW should succeed reading a well-known REG_DWORD value");
+        match value {
+            RegistryValue::Dword(n) => {
+                assert!(n > 0, "CurrentMajorVersionNumber should be nonzero")
+            }
+            other => panic!("expected RegistryValue::Dword, got {other:?}"),
+        }
+        // SAFETY: `key` is still the same valid, currently-open handle.
+        unsafe { close_key(key) }.expect("RegCloseKey should succeed");
+    }
+
+    #[test]
+    fn query_value_fails_for_a_nonexistent_value_name() {
+        // SAFETY: `HKEY_LOCAL_MACHINE` is a predefined, always-valid root.
+        let key = unsafe { open_key(HKEY_LOCAL_MACHINE, CURRENT_VERSION_KEY, KEY_READ) }
+            .expect("RegOpenKeyExW should succeed for a well-known, always-present subkey");
+        // SAFETY: `key` was just opened above and stays open for this
+        // whole call.
+        let err = unsafe { query_value(key, "ThisValueNameDefinitelyDoesNotExist12345") }
+            .expect_err("RegQueryValueExW should fail for a nonexistent value name");
+        assert_eq!(err, crate::error::Win32Error::ERROR_FILE_NOT_FOUND);
+        // SAFETY: `key` is still the same valid, currently-open handle.
+        unsafe { close_key(key) }.expect("RegCloseKey should succeed");
     }
 }

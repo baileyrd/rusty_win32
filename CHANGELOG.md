@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `registry::query_value` (`RegQueryValueExW`) plus the `RegistryValue`
+  enum (`None`/`Sz`/`ExpandSz`/`Dword`/`Qword`/`Binary`/`MultiSz`) — reads
+  a value's data decoded by its real `dwType`, using the
+  query-size-then-allocate idiom `path::search_path`/`fs::final_path`
+  already use.
 - `registry::create_key` (`RegCreateKeyExW`) plus `KeyDisposition`
   (`CreatedNewKey`/`OpenedExistingKey`) — an idempotent "open or create"
   in one call, reporting via the returned disposition which one happened.
