@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #114 — process: add priority_class/set_priority_class (GetPriorityClass/SetPriorityClass)
+**2026-07-23** · [#114](https://github.com/baileyrd/rusty_win32/pull/114)
+
+- **Added:** `process::priority_class`/`process::set_priority_class`
+  (`GetPriorityClass`/`SetPriorityClass`) plus the `*_PRIORITY_CLASS`
+  constants (`IDLE`/`BELOW_NORMAL`/`NORMAL`/`ABOVE_NORMAL`/`HIGH`/
+  `REALTIME`), closing issue #81 from the parity-loop sweep — the Windows
+  analog of `nice`/`renice`. No current `rush` feature asks for this, but
+  it's the natural primitive if a `nice`/`renice`-style feature is ever
+  added.
+
 ## PR #113 — path: add temp_path/temp_file_name (GetTempPathW/GetTempFileNameW)
 **2026-07-23** · [#113](https://github.com/baileyrd/rusty_win32/pull/113)
 
