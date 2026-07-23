@@ -104,6 +104,7 @@ unsafe extern "system" {
     fn Sleep(milliseconds: u32);
     fn SleepEx(milliseconds: u32, alertable: i32) -> u32;
     fn GetSystemInfo(system_info: *mut SystemInfo);
+    fn GetTickCount64() -> u64;
     fn GetComputerNameW(buffer: *mut u16, size: *mut u32) -> i32;
     fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
     fn SetErrorMode(mode: u32) -> u32;
@@ -1134,6 +1135,19 @@ pub fn logical_processor_count() -> u32 {
     info.number_of_processors
 }
 
+/// Milliseconds elapsed since the system started — `GetTickCount64`, a
+/// coarser, simpler monotonic counter alongside
+/// [`crate::time::now_monotonic`]'s `QueryPerformanceCounter`-backed high
+/// resolution one; some callers may still prefer this for its trivial
+/// units. No `Result`: `GetTickCount64` has no documented failure mode,
+/// matching this crate's already-established "never fails" pattern (e.g.
+/// `GetDriveTypeW`). No current `rush` feature asks for this; filed for
+/// Win32 parity.
+pub fn tick_count() -> u64 {
+    // SAFETY: `GetTickCount64` takes no arguments and has no precondition.
+    unsafe { GetTickCount64() }
+}
+
 /// This machine's NetBIOS computer name — `GetComputerNameW`, the primitive
 /// behind `$HOSTNAME`, a shell prompt, or a `hostname` builtin.
 pub fn computer_name() -> Result<alloc::string::String, Win32Error> {
@@ -1852,6 +1866,18 @@ mod tests {
         assert!(
             logical_processor_count() > 0,
             "every real machine has at least one logical processor"
+        );
+    }
+
+    #[test]
+    fn tick_count_is_nondecreasing_and_advances() {
+        let before = tick_count();
+        sleep_ms(20);
+        let after = tick_count();
+        assert!(after >= before, "GetTickCount64 should never go backwards");
+        assert!(
+            after > before,
+            "GetTickCount64 should have advanced after a real sleep"
         );
     }
 

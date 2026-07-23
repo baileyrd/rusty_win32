@@ -172,6 +172,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `job::open_by_name` (`OpenJobObjectW`) plus `JOB_OBJECT_ALL_ACCESS`, the
   reverse direction of `job::create`, which only ever makes anonymous
   jobs — another round-2 item.
+- `process::tick_count` (`GetTickCount64`), a coarser, simpler monotonic
+  counter alongside `time::now_monotonic`'s high-resolution one —
+  another round-2 item.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
