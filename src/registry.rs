@@ -55,6 +55,14 @@ unsafe extern "system" {
         data: *mut u8,
         data_size: *mut u32,
     ) -> i32;
+    fn RegSetValueExW(
+        key: HKey,
+        value_name: *const u16,
+        reserved: u32,
+        value_type: u32,
+        data: *const u8,
+        data_size: u32,
+    ) -> i32;
 }
 
 /// `RegCreateKeyExW`'s `dwOptions`: an ordinary, disk-persisted key —
@@ -257,6 +265,7 @@ pub enum RegistryValue {
 /// [`RegistryValue::None`] rather than failing outright, since a caller
 /// asking for an ordinary value's data shouldn't have to know about every
 /// obscure type up front.
+const REG_NONE: u32 = 0;
 const REG_SZ: u32 = 1;
 const REG_EXPAND_SZ: u32 = 2;
 const REG_BINARY: u32 = 3;
@@ -386,6 +395,84 @@ pub unsafe fn query_value(
         REG_BINARY => RegistryValue::Binary(buf),
         _ => RegistryValue::None,
     })
+}
+
+fn encode_wide_string(s: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(s.len() * 2 + 2);
+    for unit in s.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes
+}
+
+fn encode_multi_sz(strings: &[alloc::string::String]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for s in strings {
+        bytes.extend_from_slice(&encode_wide_string(s));
+    }
+    // `REG_MULTI_SZ`'s own end marker: an extra NUL after the last
+    // string's own NUL terminator, making the whole buffer end in a
+    // double NUL. `encode_wide_string` already appended one NUL per
+    // string above, so this is the one additional terminator — for an
+    // empty list, this alone produces the minimal valid empty
+    // `REG_MULTI_SZ` encoding (a single NUL `u16`).
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes
+}
+
+/// Write `name`'s value data in `key` — `RegSetValueExW`, the write-side
+/// counterpart to [`query_value`]. Encodes `value` into the `dwType`/
+/// byte-buffer shape each `REG_*` type expects: UTF-16 with a NUL
+/// terminator for [`RegistryValue::Sz`]/[`RegistryValue::ExpandSz`], each
+/// string NUL-terminated plus a trailing extra NUL for
+/// [`RegistryValue::MultiSz`], little-endian bytes for
+/// [`RegistryValue::Dword`]/[`RegistryValue::Qword`], and the raw bytes
+/// as-is for [`RegistryValue::Binary`]. Creates the value if `name`
+/// doesn't already exist under `key`, overwrites it if it does.
+///
+/// # Safety
+///
+/// `key` must be a currently-valid `HKey` — one of the predefined roots
+/// in this module, or a key [`open_key`]/[`create_key`] previously
+/// returned that hasn't been closed yet, opened/created with
+/// [`KEY_WRITE`] (or a superset of it, e.g. [`KEY_ALL_ACCESS`]) access.
+pub unsafe fn set_value(
+    key: HKey,
+    name: &str,
+    value: &RegistryValue,
+) -> Result<(), crate::error::Win32Error> {
+    let wide_name: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+    let (value_type, data) = match value {
+        RegistryValue::None => (REG_NONE, Vec::new()),
+        RegistryValue::Sz(s) => (REG_SZ, encode_wide_string(s)),
+        RegistryValue::ExpandSz(s) => (REG_EXPAND_SZ, encode_wide_string(s)),
+        RegistryValue::Dword(n) => (REG_DWORD, n.to_le_bytes().to_vec()),
+        RegistryValue::Qword(n) => (REG_QWORD, n.to_le_bytes().to_vec()),
+        RegistryValue::Binary(bytes) => (REG_BINARY, bytes.clone()),
+        RegistryValue::MultiSz(strings) => (REG_MULTI_SZ, encode_multi_sz(strings)),
+    };
+    // SAFETY: `key` is caller-supplied per this function's own safety
+    // contract; `wide_name` is a valid, NUL-terminated UTF-16 string live
+    // for the whole call; `data` is a valid, `data.len()`-byte buffer
+    // (even when empty — `Vec::as_ptr` on an empty `Vec` is a well-defined
+    // dangling-but-non-null pointer, never dereferenced when `data_size`
+    // is `0`).
+    let status = unsafe {
+        RegSetValueExW(
+            key,
+            wide_name.as_ptr(),
+            0,
+            value_type,
+            data.as_ptr(),
+            data.len() as u32,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(crate::error::Win32Error::from_raw(status as u32))
+    }
 }
 
 #[cfg(test)]
@@ -548,6 +635,59 @@ mod tests {
         let err = unsafe { query_value(key, "ThisValueNameDefinitelyDoesNotExist12345") }
             .expect_err("RegQueryValueExW should fail for a nonexistent value name");
         assert_eq!(err, crate::error::Win32Error::ERROR_FILE_NOT_FOUND);
+        // SAFETY: `key` is still the same valid, currently-open handle.
+        unsafe { close_key(key) }.expect("RegCloseKey should succeed");
+    }
+
+    #[test]
+    fn set_value_then_query_value_round_trips_every_variant() {
+        // Uniquified by this test process's own pid for the same reason
+        // `create_key`'s own test is: this crate's CI job runs `cargo
+        // test` twice on the same Windows VM, with no `delete_key` yet to
+        // clean this up in between.
+        let subkey = format!(
+            "Software\\rusty_win32_registry_test_set_value_{}",
+            std::process::id()
+        );
+        // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid root.
+        let (key, _disposition) =
+            unsafe { create_key(HKEY_CURRENT_USER, subkey.as_str(), KEY_ALL_ACCESS) }
+                .expect("RegCreateKeyExW should succeed");
+
+        let cases = [
+            ("a_sz", RegistryValue::Sz("hello".into())),
+            (
+                "an_expand_sz",
+                RegistryValue::ExpandSz("%SystemRoot%\\system32".into()),
+            ),
+            ("a_dword", RegistryValue::Dword(0xDEAD_BEEF)),
+            ("a_qword", RegistryValue::Qword(0xDEAD_BEEF_0BAD_F00D)),
+            (
+                "a_binary",
+                RegistryValue::Binary(alloc::vec![1, 2, 3, 4, 5]),
+            ),
+            (
+                "a_multi_sz",
+                RegistryValue::MultiSz(alloc::vec![
+                    "first".into(),
+                    "second".into(),
+                    "third".into()
+                ]),
+            ),
+            ("an_empty_multi_sz", RegistryValue::MultiSz(Vec::new())),
+        ];
+
+        for (name, value) in &cases {
+            // SAFETY: `key` was just created above, opened with
+            // `KEY_ALL_ACCESS`, and stays open for this whole loop.
+            unsafe { set_value(key, name, value) }
+                .unwrap_or_else(|e| panic!("RegSetValueExW should succeed for {name}: {e}"));
+            // SAFETY: same as above.
+            let read_back = unsafe { query_value(key, name) }
+                .unwrap_or_else(|e| panic!("RegQueryValueExW should succeed for {name}: {e}"));
+            assert_eq!(&read_back, value, "round trip mismatch for {name}");
+        }
+
         // SAFETY: `key` is still the same valid, currently-open handle.
         unsafe { close_key(key) }.expect("RegCloseKey should succeed");
     }

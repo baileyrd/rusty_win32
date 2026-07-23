@@ -6,6 +6,21 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #217 — registry: add set_value
+**2026-07-23** · [#217](https://github.com/baileyrd/rusty_win32/pull/217)
+
+- **Added:** `registry::set_value` (`RegSetValueExW`), closing issue
+  #146 — the write-side counterpart to `query_value`, encoding a
+  `RegistryValue` back into the `dwType`/byte-buffer shape each `REG_*`
+  type expects (UTF-16 with a NUL terminator for `Sz`/`ExpandSz`, each
+  string NUL-terminated plus a trailing extra NUL for `MultiSz`,
+  little-endian bytes for `Dword`/`Qword`, raw bytes as-is for `Binary`).
+  Tested via a full set-then-query round trip through every
+  `RegistryValue` variant under a per-process-unique `HKEY_CURRENT_USER`
+  subkey (uniquified by pid for the same reason `create_key`'s own test
+  is — no `delete_key` yet to clean up between this crate's two
+  same-VM `cargo test` invocations).
+
 ## PR #216 — registry: add query_value
 **2026-07-23** · [#216](https://github.com/baileyrd/rusty_win32/pull/216)
 
