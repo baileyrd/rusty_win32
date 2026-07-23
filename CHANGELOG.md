@@ -5,6 +5,16 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `service` module (new subsystem): `service::open_manager`/
+  `service::open_service`/`service::close` (`OpenSCManagerW`/
+  `OpenServiceW`/`CloseServiceHandle`) plus `SC_MANAGER_CONNECT`/
+  `SERVICE_QUERY_CONFIG`/`SERVICE_QUERY_STATUS` — the SCM/service handle
+  lifecycle, first piece of a `systemctl`-equivalent, previously excluded
+  by this crate's own non-goals, now in scope per explicit round-2
+  direction. Reuses `handle::RawHandle` for `SC_HANDLE` rather than a
+  distinct type (ABI-compatible, `DECLARE_HANDLE`-based like `HANDLE`
+  itself), closed via `service::close`/`CloseServiceHandle`, never
+  `handle`'s own close functions.
 - `security::sd_to_string`/`security::string_to_sd`
   (`ConvertSecurityDescriptorToStringSecurityDescriptorW`/
   `ConvertStringSecurityDescriptorToSecurityDescriptorW`) plus
