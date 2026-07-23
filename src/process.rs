@@ -108,6 +108,12 @@ unsafe extern "system" {
     fn SetErrorMode(mode: u32) -> u32;
     fn GetPriorityClass(process: RawHandle) -> u32;
     fn SetPriorityClass(process: RawHandle, priority_class: u32) -> i32;
+    fn GetProcessAffinityMask(
+        process: RawHandle,
+        process_affinity_mask: *mut usize,
+        system_affinity_mask: *mut usize,
+    ) -> i32;
+    fn SetProcessAffinityMask(process: RawHandle, process_affinity_mask: usize) -> i32;
     fn QueryFullProcessImageNameW(
         process: RawHandle,
         flags: u32,
@@ -1246,6 +1252,46 @@ pub unsafe fn set_priority_class(
     }
 }
 
+/// `process`'s CPU affinity mask (which CPUs it may run on) plus the
+/// system's own mask of CPUs available at all — `GetProcessAffinityMask`,
+/// the Windows analog of `sched_getaffinity`/`taskset`'s read side. No
+/// current `rush` feature asks for this; filed for Win32 parity.
+///
+/// # Safety
+///
+/// `process` must be a currently-open, valid process handle.
+pub unsafe fn affinity(process: RawHandle) -> Result<(usize, usize), Win32Error> {
+    let mut process_mask: usize = 0;
+    let mut system_mask: usize = 0;
+    // SAFETY: `process` is caller-supplied per this function's own safety
+    // contract; the two out-pointers are valid, distinct local variables.
+    let ok = unsafe { GetProcessAffinityMask(process, &mut process_mask, &mut system_mask) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok((process_mask, system_mask))
+    }
+}
+
+/// Set `process`'s CPU affinity mask — `SetProcessAffinityMask`, the
+/// Windows analog of `taskset`/`sched_setaffinity`. `mask` must be a subset
+/// of the system affinity mask `affinity` reports, or this fails with
+/// `ERROR_INVALID_PARAMETER`.
+///
+/// # Safety
+///
+/// `process` must be a currently-open, valid process handle.
+pub unsafe fn set_affinity(process: RawHandle, mask: usize) -> Result<(), Win32Error> {
+    // SAFETY: `process` is caller-supplied per this function's own safety
+    // contract; `mask` is a plain value, not a pointer.
+    let ok = unsafe { SetProcessAffinityMask(process, mask) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1770,6 +1816,35 @@ mod tests {
         unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
         // SAFETY: `spawned.process` is a valid, currently-open handle.
         unsafe { wait(spawned.process, None) }.unwrap();
+
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+        }
+    }
+
+    #[test]
+    fn set_affinity_then_affinity_round_trips() {
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known system binary.
+        let spawned = unsafe { spawn_suspended("cmd.exe /c exit 0", false, false, None) }
+            .expect("CreateProcessW should succeed");
+
+        // SAFETY: `spawned.process` is a freshly created, valid handle.
+        let (_, system_mask) =
+            unsafe { affinity(spawned.process) }.expect("GetProcessAffinityMask should succeed");
+        // Restrict to just the lowest bit the system mask actually has set,
+        // so this passes on a single-CPU CI runner too.
+        let one_cpu = 1usize << system_mask.trailing_zeros();
+
+        // SAFETY: same handle; `one_cpu` is a subset of `system_mask`.
+        unsafe { set_affinity(spawned.process, one_cpu) }
+            .expect("SetProcessAffinityMask should succeed");
+        // SAFETY: same handle.
+        let (process_mask, _) =
+            unsafe { affinity(spawned.process) }.expect("GetProcessAffinityMask should succeed");
+        assert_eq!(process_mask, one_cpu);
 
         // SAFETY: both handles are valid and each closed exactly once.
         unsafe {

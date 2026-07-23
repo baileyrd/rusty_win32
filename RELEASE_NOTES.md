@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #191 — process: add affinity/set_affinity (GetProcessAffinityMask/SetProcessAffinityMask)
+**2026-07-23** · [#191](https://github.com/baileyrd/rusty_win32/pull/191)
+
+- **Added:** `process::affinity`/`process::set_affinity`
+  (`GetProcessAffinityMask`/`SetProcessAffinityMask`), closing issue #120 —
+  the first of the round-2 "weak/no clear consumer" items added per
+  explicit direction (`gap-analysis.md`), with the usual "needs a `rush`/
+  `rusty_lines` consumer" gate dropped for this round. The Windows analog
+  of `sched_getaffinity`/`taskset`. No current `rush` feature asks for
+  this; filed for Win32 parity/completeness.
+
 ## PR #118 — fs: add lock_file/unlock_file (LockFileEx/UnlockFileEx)
 **2026-07-23** · [#118](https://github.com/baileyrd/rusty_win32/pull/118)
 
