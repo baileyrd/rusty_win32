@@ -6,6 +6,15 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #204 — job: add open_by_name (OpenJobObjectW)
+**2026-07-23** · [#204](https://github.com/baileyrd/rusty_win32/pull/204)
+
+- **Added:** `job::open_by_name` (`OpenJobObjectW`) plus
+  `JOB_OBJECT_ALL_ACCESS`, closing issue #133 — the reverse direction of
+  `job::create`, which only ever makes anonymous jobs. Another round-2
+  "weak/no clear consumer" item (`gap-analysis.md`); no current `rush`
+  feature asks for this.
+
 ## PR #203 — pipe: add transact/call (TransactNamedPipe/CallNamedPipeW)
 **2026-07-23** · [#203](https://github.com/baileyrd/rusty_win32/pull/203)
 
