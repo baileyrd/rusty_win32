@@ -166,6 +166,12 @@
 //! allocation-free path for the common/named codes, rather than replacing
 //! it outright.
 //!
+//! [`process::list_processes`] (`CreateToolhelp32Snapshot`/
+//! `Process32FirstW`/`Process32NextW`) rounds out the capability
+//! assessment's remaining lower-priority items with a `ps`-equivalent:
+//! a point-in-time system-wide process snapshot, not previously possible
+//! with anything in this crate.
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or
@@ -193,9 +199,9 @@ pub use handle::{RawHandle, close, create_pipe, duplicate, pipe_bytes_available,
 pub mod process;
 #[cfg(windows)]
 pub use process::{
-    MAXIMUM_WAIT_OBJECTS, PROCESS_TERMINATE, SYNCHRONIZE, SpawnedProcess, current_pid,
-    environment_block, environment_snapshot, open_by_pid, resume, spawn_suspended, terminate, wait,
-    wait_any,
+    MAXIMUM_WAIT_OBJECTS, PROCESS_TERMINATE, ProcessEntry, SYNCHRONIZE, SpawnedProcess,
+    current_pid, environment_block, environment_snapshot, list_processes, open_by_pid, resume,
+    spawn_suspended, terminate, wait, wait_any,
 };
 
 // `job`'s six-item surface (`create`/`assign`/`set_kill_on_close`/

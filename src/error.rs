@@ -147,6 +147,7 @@ win32_errors! {
     ERROR_NOT_FOUND = 1168 => "element not found",
     ERROR_TIMEOUT = 1460 => "this operation returned because the timeout period expired",
     ERROR_NOT_A_REPARSE_POINT = 4390 => "the file or directory is not a reparse point",
+    ERROR_NO_MORE_FILES = 18 => "there are no more files",
 }
 
 impl core::error::Error for Win32Error {}

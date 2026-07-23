@@ -100,7 +100,62 @@ unsafe extern "system" {
     fn TerminateProcess(process: RawHandle, exit_code: u32) -> i32;
     fn GetEnvironmentStringsW() -> *mut u16;
     fn FreeEnvironmentStringsW(penv: *mut u16) -> i32;
+    fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> RawHandle;
+    fn Process32FirstW(snapshot: RawHandle, entry: *mut ProcessEntry32W) -> i32;
+    fn Process32NextW(snapshot: RawHandle, entry: *mut ProcessEntry32W) -> i32;
 }
+
+/// `CreateToolhelp32Snapshot`'s `dwFlags`: include every process currently
+/// running in the snapshot.
+const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+
+// PROCESSENTRY32W: `size_of` 568, `align_of` 8 on x86_64. Verified against
+// mingw-w64's `tlhelp32.h` the same way as every other struct in this crate
+// (an offset-extraction probe compiled with `x86_64-w64-mingw32-gcc`
+// against the real header, reading each field's compile-time-constant
+// `offsetof`/`sizeof` back out of the generated object code — the same
+// technique as this crate's usual `_Static_assert` probes, needed here only
+// because the exact total size wasn't obvious to guess up front, unlike
+// this crate's other structs).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ProcessEntry32W {
+    dw_size: u32,
+    cnt_usage: u32,
+    th32_process_id: u32,
+    th32_default_heap_id: u64,
+    th32_module_id: u32,
+    cnt_threads: u32,
+    th32_parent_process_id: u32,
+    pc_pri_class_base: i32,
+    dw_flags: u32,
+    sz_exe_file: [u16; 260],
+}
+
+// `[u16; 260]` doesn't implement `Default` (std only special-cases arrays
+// up to length 32), so this is written by hand rather than derived.
+impl Default for ProcessEntry32W {
+    fn default() -> Self {
+        ProcessEntry32W {
+            dw_size: 0,
+            cnt_usage: 0,
+            th32_process_id: 0,
+            th32_default_heap_id: 0,
+            th32_module_id: 0,
+            cnt_threads: 0,
+            th32_parent_process_id: 0,
+            pc_pri_class_base: 0,
+            dw_flags: 0,
+            sz_exe_file: [0u16; 260],
+        }
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<ProcessEntry32W>() == 568);
+const _: () = assert!(core::mem::align_of::<ProcessEntry32W>() == 8);
+const _: () = assert!(core::mem::offset_of!(ProcessEntry32W, th32_default_heap_id) == 16);
+const _: () = assert!(core::mem::offset_of!(ProcessEntry32W, th32_parent_process_id) == 32);
+const _: () = assert!(core::mem::offset_of!(ProcessEntry32W, sz_exe_file) == 44);
 
 /// `OpenProcess`'s access-rights bit letting the returned handle be passed to
 /// [`terminate`].
@@ -320,6 +375,76 @@ fn parse_environment_entry(
         alloc::string::String::from_utf16_lossy(&units[..equals_index]),
         alloc::string::String::from_utf16_lossy(&units[equals_index + 1..]),
     ))
+}
+
+/// One entry from [`list_processes`]'s system-wide snapshot — a `ps`-row's
+/// worth of information about a single process. `exe_file` is the
+/// executable's bare filename (e.g. `"cmd.exe"`), not a full path —
+/// `PROCESSENTRY32W` itself doesn't carry one; resolving a pid to its full
+/// path is a separate, unrelated primitive this crate doesn't currently
+/// expose.
+#[derive(Debug, Clone)]
+pub struct ProcessEntry {
+    pub pid: u32,
+    pub parent_pid: u32,
+    pub thread_count: u32,
+    pub exe_file: alloc::string::String,
+}
+
+/// List every process currently running on the system — a `ps`-equivalent,
+/// via `CreateToolhelp32Snapshot`/`Process32FirstW`/`Process32NextW`. The
+/// snapshot is a point-in-time copy: a process that exits mid-enumeration
+/// still appears (it existed when the snapshot was taken), and one started
+/// afterward doesn't.
+pub fn list_processes() -> Result<Vec<ProcessEntry>, Win32Error> {
+    // SAFETY: `TH32CS_SNAPPROCESS` is a documented-valid flag on its own;
+    // `process_id = 0` is a plain value (ignored for a process-only
+    // snapshot, not a pointer).
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot.is_null() || snapshot as isize == -1 {
+        return Err(Win32Error::last());
+    }
+
+    let mut entry = ProcessEntry32W {
+        dw_size: core::mem::size_of::<ProcessEntry32W>() as u32,
+        ..ProcessEntry32W::default()
+    };
+    let mut entries = Vec::new();
+    // SAFETY: `snapshot` is freshly created and valid; `entry` is a valid,
+    // correctly-sized (`dw_size` set, as both calls require) out-pointer.
+    let mut found = unsafe { Process32FirstW(snapshot, &mut entry) };
+    while found != 0 {
+        entries.push(ProcessEntry {
+            pid: entry.th32_process_id,
+            parent_pid: entry.th32_parent_process_id,
+            thread_count: entry.cnt_threads,
+            exe_file: decode_exe_file(&entry.sz_exe_file),
+        });
+        // SAFETY: same as above — `snapshot`/`entry` are still the same
+        // valid handle/out-pointer.
+        found = unsafe { Process32NextW(snapshot, &mut entry) };
+    }
+    // `Process32NextW`'s own documented end-of-enumeration signal is a
+    // `FALSE` return with `GetLastError() == ERROR_NO_MORE_FILES` — not a
+    // real failure, just "nothing left to report." Anything else reaching
+    // here (including a `Process32FirstW` that failed on its very first
+    // call, for a real reason) is a genuine error.
+    let last_error = Win32Error::last();
+    // SAFETY: `snapshot` is a valid, currently-open handle, closed exactly
+    // once and not used again after this.
+    let _ = unsafe { crate::handle::close(snapshot) };
+    if last_error != Win32Error::ERROR_NO_MORE_FILES {
+        return Err(last_error);
+    }
+    Ok(entries)
+}
+
+/// Decode a `PROCESSENTRY32W::szExeFile`-shaped fixed buffer up to its first
+/// NUL (or the whole buffer, if unterminated — not expected in practice,
+/// but not assumed away either).
+fn decode_exe_file(units: &[u16; 260]) -> alloc::string::String {
+    let len = units.iter().position(|&u| u == 0).unwrap_or(units.len());
+    alloc::string::String::from_utf16_lossy(&units[..len])
 }
 
 /// Resume a thread suspended by [`spawn_suspended`] (or any other
@@ -726,5 +851,24 @@ mod tests {
 
         // SAFETY: see above.
         unsafe { std::env::remove_var("RUSTY_WIN32_ENV_SNAPSHOT_TEST") };
+    }
+
+    #[test]
+    fn list_processes_includes_the_calling_process_itself() {
+        let entries = list_processes()
+            .expect("CreateToolhelp32Snapshot/Process32FirstW/Process32NextW should succeed");
+        let this_pid = current_pid();
+        let found = entries
+            .iter()
+            .find(|entry| entry.pid == this_pid)
+            .unwrap_or_else(|| panic!("the calling process's own pid {this_pid} should appear in a system-wide snapshot"));
+        assert!(
+            found.thread_count >= 1,
+            "a running process should report at least one thread"
+        );
+        assert!(
+            !found.exe_file.is_empty(),
+            "the calling process's own entry should report a non-empty exe_file"
+        );
     }
 }
