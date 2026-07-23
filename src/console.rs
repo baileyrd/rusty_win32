@@ -59,6 +59,7 @@ unsafe extern "system" {
         console_output: RawHandle,
         buffer_info: *mut ConsoleScreenBufferInfo,
     ) -> i32;
+    fn SetConsoleCursorPosition(console_output: RawHandle, cursor_position: Coord) -> i32;
     fn WaitForSingleObject(handle: RawHandle, milliseconds: u32) -> u32;
     fn WriteConsoleInputW(
         console_input: RawHandle,
@@ -513,6 +514,34 @@ pub unsafe fn window_size(console_output: RawHandle) -> Result<(u16, u16), Win32
     Ok((cols, rows))
 }
 
+/// Move the cursor to `(x, y)` (0-based column/row, relative to the screen
+/// buffer's origin, same coordinate space `window_size`'s underlying
+/// `CONSOLE_SCREEN_BUFFER_INFO.dwCursorPosition` reports) —
+/// `SetConsoleCursorPosition`. Needed by a raw-mode line editor
+/// (`rusty_lines`) doing multi-line prompt redraws that must reposition the
+/// cursor directly rather than relying on a VT-escape-sequence fallback,
+/// which this crate assumes no caller has anywhere else.
+///
+/// # Safety
+///
+/// `console_output` must be a currently-open, valid handle to a console
+/// output buffer.
+pub unsafe fn set_cursor_position(
+    console_output: RawHandle,
+    x: i16,
+    y: i16,
+) -> Result<(), Win32Error> {
+    // SAFETY: `console_output` is caller-supplied per this function's own
+    // safety contract; `Coord { x, y }` is a plain-data struct passed by
+    // value, not a pointer.
+    let ok = unsafe { SetConsoleCursorPosition(console_output, Coord { x, y }) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
 /// Synthesize `text` as a sequence of real console key events —
 /// `WriteConsoleInputW`, the standard, documented technique console
 /// automation tools use to inject keystrokes (queues `INPUT_RECORD`s into
@@ -874,6 +903,26 @@ mod tests {
             unsafe { window_size(stdout) }.expect("GetConsoleScreenBufferInfo should succeed");
         assert!(cols > 0, "a real console should report a nonzero width");
         assert!(rows > 0, "a real console should report a nonzero height");
+    }
+
+    #[test]
+    fn set_cursor_position_moves_the_cursor() {
+        let _ = ensure_console_stdin(); // guarantee a console exists first
+        let stdout = open_console("CONOUT$")
+            .expect("a console output buffer should be openable once a console exists");
+
+        // SAFETY: `stdout` is a valid console output handle per the above;
+        // this is the operation under test.
+        unsafe { set_cursor_position(stdout, 3, 2) }
+            .expect("SetConsoleCursorPosition should succeed");
+
+        let mut info = ConsoleScreenBufferInfo::default();
+        // SAFETY: `stdout` is a valid console output handle; `info` is a
+        // valid, correctly-sized out-pointer.
+        let ok = unsafe { GetConsoleScreenBufferInfo(stdout, &mut info) };
+        assert_ne!(ok, 0, "GetConsoleScreenBufferInfo should succeed");
+        assert_eq!(info.cursor_position.x, 3);
+        assert_eq!(info.cursor_position.y, 2);
     }
 
     /// The empirical validation this whole primitive exists for: does a

@@ -61,6 +61,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `console::title`/`console::set_title`
   (`GetConsoleTitleW`/`SetConsoleTitleW`), the Windows analog of xterm's OSC
   title-setting escape sequence — another parity-loop find.
+- `console::set_cursor_position` (`SetConsoleCursorPosition`), the write
+  side of `window_size`'s cursor-position read — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
