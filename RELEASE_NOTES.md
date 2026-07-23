@@ -6,6 +6,16 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #224 — registry: add delete_tree
+**2026-07-23** · [#224](https://github.com/baileyrd/rusty_win32/pull/224)
+
+- **Added:** `registry::delete_tree` (`RegDeleteTreeW`), closing issue
+  #153 — recursively delete a subkey and everything beneath it (values,
+  subkeys, and their own subkeys) in one call, without `delete_key`'s
+  leaf-only restriction forcing a hand-rolled enumerate-and-recurse loop.
+  This completes the `registry` module's round-2 item list (issues
+  #142-#153).
+
 ## PR #223 — registry: add flush_key
 **2026-07-23** · [#223](https://github.com/baileyrd/rusty_win32/pull/223)
 

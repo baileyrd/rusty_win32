@@ -5,10 +5,14 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `registry::delete_tree` (`RegDeleteTreeW`) — recursively delete a
+  subkey and everything beneath it in one call, without
+  `delete_key`'s leaf-only restriction forcing a hand-rolled
+  enumerate-and-recurse loop. This completes the `registry` module's
+  round-2 item list (issues #142-#153).
 - `registry::flush_key` (`RegFlushKey`) — force a key's changes to disk
   immediately instead of Windows' lazy flush, a real durability gap for
-  settings writes right before a risky operation. This completes the
-  `registry` module's round-2 item list (issues #142-#152).
+  settings writes right before a risky operation.
 - `registry::key_info` (`RegQueryInfoKeyW`) plus the `KeyInfo` struct —
   subkey/value counts and max name/data lengths in one call, the same
   query `enum_values`/`enum_keys` already use internally to pre-size
