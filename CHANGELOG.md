@@ -103,6 +103,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `mkdir`/`rmdir` builtins — another parity-loop find.
 - `fs::create_hard_link` (`CreateHardLinkW`), `ln` without `-s` — another
   parity-loop find.
+- `path::temp_path`/`path::temp_file_name`
+  (`GetTempPathW`/`GetTempFileNameW`), for heredoc scratch files or a
+  `mktemp` builtin — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

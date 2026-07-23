@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #113 — path: add temp_path/temp_file_name (GetTempPathW/GetTempFileNameW)
+**2026-07-23** · [#113](https://github.com/baileyrd/rusty_win32/pull/113)
+
+- **Added:** `path::temp_path`/`path::temp_file_name`
+  (`GetTempPathW`/`GetTempFileNameW`), closing issue #80 from the
+  parity-loop sweep — needed for heredoc scratch files or a `mktemp`
+  builtin. `temp_file_name` documents a real Windows quirk rather than
+  working around it silently: `GetTempFileNameW` also *creates* the
+  (empty) file as a side effect, unlike a POSIX `mktemp`-style name
+  generator, which only reserves a name.
+
 ## PR #112 — fs: add create_hard_link (CreateHardLinkW)
 **2026-07-23** · [#112](https://github.com/baileyrd/rusty_win32/pull/112)
 

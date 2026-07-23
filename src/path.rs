@@ -40,6 +40,13 @@ unsafe extern "system" {
         buffer: *mut u16,
         file_part: *mut *mut u16,
     ) -> u32;
+    fn GetTempPathW(buffer_length: u32, buffer: *mut u16) -> u32;
+    fn GetTempFileNameW(
+        path_name: *const u16,
+        prefix_string: *const u16,
+        unique: u32,
+        tmp_file_name: *mut u16,
+    ) -> u32;
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -272,6 +279,57 @@ pub fn set_current_dir(path: &str) -> Result<(), Win32Error> {
     }
 }
 
+/// The current user's temporary-file directory, per the standard
+/// `TMP`/`TEMP`/`USERPROFILE`/Windows-directory lookup chain —
+/// `GetTempPathW`. Returned with a trailing backslash, `GetTempPathW`'s own
+/// documented convention. Needed for heredoc scratch files or a `mktemp`
+/// builtin.
+pub fn temp_path() -> Result<String, Win32Error> {
+    let mut buf: Vec<u16> = alloc::vec![0u16; MAX_PATH];
+    // Same two-attempt growth pattern as `search_path`/`short_path`/`full_path`.
+    for _ in 0..2 {
+        // SAFETY: `buf` is a valid, `buf.len()`-element writable buffer.
+        let needed = unsafe { GetTempPathW(buf.len() as u32, buf.as_mut_ptr()) };
+        if needed == 0 {
+            return Err(Win32Error::last());
+        }
+        if (needed as usize) > buf.len() {
+            buf.resize(needed as usize, 0);
+            continue;
+        }
+        return Ok(String::from_utf16_lossy(&buf[..needed as usize]));
+    }
+    Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
+}
+
+/// Generate a unique temporary file name under `dir`, starting with
+/// `prefix` (only its first 3 characters are used — `GetTempFileNameW`'s
+/// own documented truncation) — `GetTempFileNameW`. A real Windows quirk
+/// worth calling out, not something to work around silently: this call
+/// also *creates* the (empty) file as a side effect, unlike a POSIX
+/// `mktemp`-style name generator, which only reserves a name. `dir` must
+/// already exist (commonly [`temp_path`]'s own return value).
+pub fn temp_file_name(dir: &str, prefix: &str) -> Result<String, Win32Error> {
+    let dir_wide = to_wide(dir);
+    let prefix_wide = to_wide(prefix);
+    // `GetTempFileNameW`'s own documented fixed buffer requirement: the
+    // caller must supply a buffer of at least `MAX_PATH` characters, unlike
+    // this module's other calls, which report a required size on failure.
+    let mut buf: Vec<u16> = alloc::vec![0u16; MAX_PATH];
+    // SAFETY: `dir_wide`/`prefix_wide` are valid, NUL-terminated UTF-16
+    // strings; `unique = 0` requests Windows generate a unique value from
+    // the system time, a documented valid input; `buf` is a valid,
+    // `MAX_PATH`-element writable buffer, `GetTempFileNameW`'s own
+    // documented minimum.
+    let unique =
+        unsafe { GetTempFileNameW(dir_wide.as_ptr(), prefix_wide.as_ptr(), 0, buf.as_mut_ptr()) };
+    if unique == 0 {
+        return Err(Win32Error::last());
+    }
+    let len = buf.iter().position(|&unit| unit == 0).unwrap_or(buf.len());
+    Ok(String::from_utf16_lossy(&buf[..len]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,5 +481,33 @@ mod tests {
             resolved.to_ascii_lowercase().ends_with("foo.txt"),
             "got: {resolved}"
         );
+    }
+
+    #[test]
+    fn temp_path_reports_an_existing_directory_ending_in_a_backslash() {
+        let path = temp_path().expect("GetTempPathW should succeed");
+        assert!(path.ends_with('\\'), "got: {path}");
+        assert!(
+            std::path::Path::new(&path).is_dir(),
+            "the reported temp path should exist and be a directory, got: {path}"
+        );
+    }
+
+    #[test]
+    fn temp_file_name_creates_an_empty_file_under_the_given_directory() {
+        let dir = temp_path().expect("GetTempPathW should succeed");
+        let file = temp_file_name(&dir, "rst").expect("GetTempFileNameW should succeed");
+
+        assert!(
+            std::path::Path::new(&file).exists(),
+            "GetTempFileNameW should create the file as a documented side effect, got: {file}"
+        );
+        assert!(
+            file.to_ascii_lowercase()
+                .starts_with(&dir.to_ascii_lowercase()),
+            "expected a file under {dir:?}, got {file:?}"
+        );
+
+        std::fs::remove_file(&file).expect("cleaning up the temp file should succeed");
     }
 }
