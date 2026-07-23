@@ -182,6 +182,14 @@
 //! one child (and its descendants), so that's what's exposed here rather
 //! than a `CTRL_C_EVENT`-shaped API that couldn't do what its name implies.
 //!
+//! [`process::times`] (`GetProcessTimes`) closes the round-2 assessment's
+//! other must-have: without it, rush's `time` builtin has no way to report
+//! real per-child CPU time on Windows at all and falls back to a hardcoded
+//! zero (a visibly wrong `time` output, not merely a missing one, on every
+//! non-Linux target). `kernel_time`/`user_time` reuse [`time::Timespec`]'s
+//! shape for an elapsed *duration* rather than a wall-clock timestamp —
+//! the same reuse [`time::now_monotonic`]'s result already relies on.
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or
@@ -209,9 +217,10 @@ pub use handle::{RawHandle, close, create_pipe, duplicate, pipe_bytes_available,
 pub mod process;
 #[cfg(windows)]
 pub use process::{
-    MAXIMUM_WAIT_OBJECTS, PROCESS_TERMINATE, ProcessEntry, SYNCHRONIZE, SpawnedProcess,
-    current_pid, environment_block, environment_snapshot, list_processes, open_by_pid, resume,
-    spawn_suspended, terminate, wait, wait_any,
+    MAXIMUM_WAIT_OBJECTS, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, ProcessEntry,
+    ProcessTimes, SYNCHRONIZE, SpawnedProcess, current_pid, environment_block,
+    environment_snapshot, list_processes, open_by_pid, resume, spawn_suspended, terminate, times,
+    wait, wait_any,
 };
 
 // `job`'s six-item surface (`create`/`assign`/`set_kill_on_close`/
