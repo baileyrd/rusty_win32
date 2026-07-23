@@ -98,6 +98,12 @@ unsafe extern "system" {
         source_sid: *mut core::ffi::c_void,
     ) -> i32;
     fn EqualSid(a: *mut core::ffi::c_void, b: *mut core::ffi::c_void) -> i32;
+    fn CreateWellKnownSid(
+        well_known_sid_type: i32,
+        domain_sid: *mut core::ffi::c_void,
+        sid: *mut core::ffi::c_void,
+        sid_size: *mut u32,
+    ) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -1076,6 +1082,70 @@ pub unsafe fn sid_equal(a: *mut core::ffi::c_void, b: *mut core::ffi::c_void) ->
     unsafe { EqualSid(a, b) != 0 }
 }
 
+/// `WELL_KNOWN_SID_TYPE` — the well-known principals [`well_known_sid`]
+/// can construct without a name-lookup round trip. Only the three named
+/// in this module's own scope (`Everyone`/`LocalSystem`/
+/// `BuiltinAdministrators` — see issue #163) are exposed; `CreateWellKnownSid`
+/// itself supports many more (`WinAnonymousSid`, `WinBuiltinGuestsSid`,
+/// dozens of others), left out until a real need for them shows up.
+/// Verified against mingw-w64's own `winnt.h` with a compiled
+/// `_Static_assert` probe.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WellKnownSidType {
+    /// `WinWorldSid` — the "Everyone" group.
+    Everyone = 1,
+    /// `WinLocalSystemSid` — the SYSTEM account.
+    LocalSystem = 22,
+    /// `WinBuiltinAdministratorsSid` — the local Administrators group.
+    BuiltinAdministrators = 26,
+}
+
+/// Construct a well-known SID (Everyone, SYSTEM, Administrators) —
+/// `CreateWellKnownSid`, without the name-lookup round trip
+/// [`lookup_account_name`] would otherwise require. `DomainSid` is always
+/// passed as `NULL`: every [`WellKnownSidType`] variant this module
+/// exposes is a machine-local or universal principal, never a
+/// domain-relative one that would need it.
+pub fn well_known_sid(kind: WellKnownSidType) -> Result<SidBuf, crate::error::Win32Error> {
+    let mut len: u32 = 0;
+    // SAFETY: a null `sid` with `len` zeroed is documented to report the
+    // required buffer size (failing with `ERROR_INSUFFICIENT_BUFFER`)
+    // without needing a real buffer yet; `domain_sid` null is valid for
+    // every `kind` this module exposes.
+    let ok = unsafe {
+        CreateWellKnownSid(
+            kind as i32,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            &mut len,
+        )
+    };
+    if ok == 0 {
+        let err = crate::error::Win32Error::last();
+        if err != crate::error::Win32Error::ERROR_INSUFFICIENT_BUFFER {
+            return Err(err);
+        }
+    }
+
+    let mut bytes: Vec<u8> = alloc::vec![0u8; len as usize];
+    // SAFETY: `bytes` is a valid buffer matched by `len` naming its exact
+    // size (from the query above); `domain_sid` null as above.
+    let ok = unsafe {
+        CreateWellKnownSid(
+            kind as i32,
+            core::ptr::null_mut(),
+            bytes.as_mut_ptr().cast(),
+            &mut len,
+        )
+    };
+    if ok == 0 {
+        return Err(crate::error::Win32Error::last());
+    }
+    bytes.truncate(len as usize);
+    Ok(SidBuf { bytes })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1529,5 +1599,41 @@ mod tests {
         assert!(!unsafe { sid_equal(owner, everyone_sid.as_ptr().cast_mut()) });
 
         std::fs::remove_file(&path).expect("removing the test file should succeed");
+    }
+
+    #[test]
+    fn well_known_sid_everyone_matches_lookup_account_names_everyone_sid() {
+        let (looked_up_sid, _) = lookup_account_name("Everyone")
+            .expect("LookupAccountNameW should succeed for the well-known Everyone group");
+        let constructed_sid = well_known_sid(WellKnownSidType::Everyone)
+            .expect("CreateWellKnownSid should succeed for WinWorldSid");
+
+        // SAFETY: both SIDs are still alive (not dropped) for this whole
+        // call.
+        assert!(unsafe {
+            sid_equal(
+                looked_up_sid.as_ptr().cast_mut(),
+                constructed_sid.as_ptr().cast_mut(),
+            )
+        });
+    }
+
+    #[test]
+    fn well_known_sid_administrators_and_local_system_are_valid_and_distinct() {
+        let administrators = well_known_sid(WellKnownSidType::BuiltinAdministrators)
+            .expect("CreateWellKnownSid should succeed for WinBuiltinAdministratorsSid");
+        let local_system = well_known_sid(WellKnownSidType::LocalSystem)
+            .expect("CreateWellKnownSid should succeed for WinLocalSystemSid");
+
+        // SAFETY: both SIDs were just constructed above and are still
+        // alive for this whole call.
+        assert!(unsafe { is_valid_sid(administrators.as_ptr().cast_mut()) });
+        assert!(unsafe { is_valid_sid(local_system.as_ptr().cast_mut()) });
+        assert!(!unsafe {
+            sid_equal(
+                administrators.as_ptr().cast_mut(),
+                local_system.as_ptr().cast_mut(),
+            )
+        });
     }
 }
