@@ -114,6 +114,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   (`Thread32First`/`Thread32Next`/`OpenThread`/`SuspendThread`) plus
   `THREAD_SUSPEND_RESUME`, the closest Windows equivalent to a
   process-wide `SIGSTOP` — another parity-loop find.
+- `pipe::set_pipe_mode` (`SetNamedPipeHandleState`), non-blocking mode and
+  byte/message-mode switching for named pipes — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

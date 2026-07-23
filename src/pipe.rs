@@ -81,6 +81,12 @@ unsafe extern "system" {
     ) -> RawHandle;
     fn ConnectNamedPipe(named_pipe: RawHandle, overlapped: *mut core::ffi::c_void) -> i32;
     fn DisconnectNamedPipe(named_pipe: RawHandle) -> i32;
+    fn SetNamedPipeHandleState(
+        named_pipe: RawHandle,
+        mode: *const u32,
+        max_collection_count: *const u32,
+        collect_data_timeout: *const u32,
+    ) -> i32;
     fn WaitNamedPipeW(name: *const u16, timeout_ms: u32) -> i32;
     fn CreateFileW(
         file_name: *const u16,
@@ -197,6 +203,32 @@ pub unsafe fn disconnect_server(pipe: RawHandle) -> Result<(), Win32Error> {
     // SAFETY: `pipe` is caller-supplied per this function's own safety
     // contract.
     let ok = unsafe { DisconnectNamedPipe(pipe) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
+/// Change `pipe`'s mode — `SetNamedPipeHandleState`. `mode` is the raw
+/// `PIPE_READMODE_*`/`PIPE_WAIT`/`PIPE_NOWAIT` bitmask already defined
+/// above — this function is a thin, policy-free wrapper, the same as
+/// [`create_server`]'s raw `PIPE_*` mode parameters. Covers two things at
+/// once: switching between byte/message read mode after creation, and
+/// [`PIPE_NOWAIT`], the named-pipe equivalent of the non-blocking check
+/// [`crate::handle::pipe_bytes_available`] (`PeekNamedPipe`) already gives
+/// anonymous pipes.
+///
+/// # Safety
+///
+/// `pipe` must be a currently-open, valid named-pipe handle.
+pub unsafe fn set_pipe_mode(pipe: RawHandle, mode: u32) -> Result<(), Win32Error> {
+    // SAFETY: `pipe` is caller-supplied per this function's own safety
+    // contract; `mode` is a valid pointer to a plain `u32` local;
+    // `max_collection_count`/`collect_data_timeout = NULL` are
+    // documented-valid inputs meaning "leave unchanged" (they only apply to
+    // message-mode pipes over a network, out of this function's own scope).
+    let ok = unsafe { SetNamedPipeHandleState(pipe, &mode, core::ptr::null(), core::ptr::null()) };
     if ok == 0 {
         Err(Win32Error::last())
     } else {
@@ -394,6 +426,44 @@ mod tests {
         unsafe {
             crate::handle::close(server).unwrap();
             crate::handle::close(second_client).unwrap();
+        }
+    }
+
+    #[test]
+    fn set_pipe_mode_succeeds_on_a_connected_pipe() {
+        let name = "rusty_win32_test_pipe_set_mode";
+        let server = create_server(
+            name,
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            1,
+            512,
+            512,
+        )
+        .expect("CreateNamedPipeW should succeed");
+
+        let client_thread = std::thread::spawn(move || {
+            wait_for_server(name, 5_000).expect("WaitNamedPipeW should succeed");
+            open_client(name, GENERIC_READ | GENERIC_WRITE).expect("CreateFileW should succeed")
+                as usize
+        });
+        // SAFETY: `server` is freshly created via `create_server` above, not
+        // yet connected.
+        unsafe { connect_server(server) }.expect("ConnectNamedPipeW should succeed");
+        let client = client_thread
+            .join()
+            .expect("client thread should not panic") as RawHandle;
+
+        // SAFETY: `client` is a freshly created, valid named-pipe handle;
+        // this is the operation under test — switching the client's read
+        // mode to non-blocking.
+        unsafe { set_pipe_mode(client, PIPE_READMODE_BYTE | PIPE_NOWAIT) }
+            .expect("SetNamedPipeHandleState should succeed");
+
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(server).unwrap();
+            crate::handle::close(client).unwrap();
         }
     }
 
