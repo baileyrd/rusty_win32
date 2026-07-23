@@ -6,6 +6,21 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #117 — handle: add create_mutex/release_mutex (CreateMutexW/ReleaseMutex)
+**2026-07-23** · [#117](https://github.com/baileyrd/rusty_win32/pull/117)
+
+- **Added:** `handle::create_mutex`/`handle::release_mutex`
+  (`CreateMutexW`/`ReleaseMutex`), closing issue #84 from the parity-loop
+  sweep — the Windows analog of `flock`'s cross-process locking, as a
+  standalone kernel object rather than a file-descriptor operation.
+  Acquiring an existing mutex is already covered by this crate's
+  `WaitForSingleObject`-shaped wait primitives (`console::wait_readable`
+  generalizes to any waitable handle, not just console ones) once a handle
+  is in hand — no new wait wrapper needed. No current `rush` feature asks
+  for this; filed for tracking (a plausible use case is guarding
+  concurrent writes to a shared history file from multiple shell
+  instances).
+
 ## PR #116 — pipe: add set_pipe_mode (SetNamedPipeHandleState)
 **2026-07-23** · [#116](https://github.com/baileyrd/rusty_win32/pull/116)
 
