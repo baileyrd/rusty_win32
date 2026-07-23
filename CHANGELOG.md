@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `registry::set_value` (`RegSetValueExW`), the write-side counterpart to
+  `query_value` — encodes a `RegistryValue` back into the `dwType`/
+  byte-buffer shape each `REG_*` type expects.
 - `registry::query_value` (`RegQueryValueExW`) plus the `RegistryValue`
   enum (`None`/`Sz`/`ExpandSz`/`Dword`/`Qword`/`Binary`/`MultiSz`) — reads
   a value's data decoded by its real `dwType`, using the
