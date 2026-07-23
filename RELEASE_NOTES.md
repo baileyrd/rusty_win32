@@ -6,6 +6,31 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #198 — volume: add find_volumes (FindFirstVolumeW/FindNextVolumeW/FindVolumeClose)
+**2026-07-23** · [#198](https://github.com/baileyrd/rusty_win32/pull/198)
+
+- **Fixed:** a CI-caught race in
+  `process::tests::thread_exit_code_reports_still_active_then_the_real_code`
+  (added in PR #192): the process handle becoming signaled after
+  `TerminateProcess` doesn't guarantee `GetExitCodeThread` already
+  reflects the thread's final exit code — Windows doesn't document those
+  two transitions as atomic with each other. Fixed by opening the thread
+  handle with `SYNCHRONIZE` too and explicitly waiting on it (via
+  `handle::wait_single_ex`, PR #195) before reading the exit code.
+- **Fixed:** a second CI-caught race, in the same run, in
+  `job::tests::accounting_reports_process_counts_after_a_process_exits`
+  (added in PR #38): the same shape of issue — the process handle becoming
+  signaled doesn't guarantee the job object's own `active_processes`
+  bookkeeping has already been decremented. Fixed with a short bounded
+  poll (up to 1s) instead of asserting on the very first read.
+- **Added:** `volume::find_volumes` (`FindFirstVolumeW`/`FindNextVolumeW`/
+  `FindVolumeClose`), closing issue #127 — enumerates every volume by its
+  stable GUID path (`\\?\Volume{GUID}\`), independent of drive-letter
+  assignment, unlike `volume::logical_drives`. Mirrors `fs::read_dir`'s
+  `ReadDir` iterator shape (`FindClose`-on-drop). Another round-2 "weak/no
+  clear consumer" item (`gap-analysis.md`); no current `rush` feature asks
+  for this.
+
 ## PR #197 — handle: add signal_and_wait (SignalObjectAndWait)
 **2026-07-23** · [#197](https://github.com/baileyrd/rusty_win32/pull/197)
 

@@ -1080,8 +1080,20 @@ mod tests {
         // SAFETY: `spawned.process` is a valid, currently-open handle.
         unsafe { process::wait(spawned.process, None) }.unwrap();
 
-        // SAFETY: `job` is a valid handle.
-        let acc = unsafe { accounting(job) }.expect("QueryInformationJobObject should succeed");
+        // The process handle becoming signaled doesn't guarantee the job
+        // object's own `active_processes` bookkeeping has already been
+        // decremented — the two aren't documented as updated atomically
+        // with each other, and this raced under CI. Poll with a bounded
+        // retry instead of asserting on the very first read.
+        let mut acc = unsafe { accounting(job) }.expect("QueryInformationJobObject should succeed");
+        for _ in 0..20 {
+            if acc.active_processes == 0 {
+                break;
+            }
+            process::sleep_ms(50);
+            // SAFETY: `job` is still a valid handle.
+            acc = unsafe { accounting(job) }.expect("QueryInformationJobObject should succeed");
+        }
         assert_eq!(
             acc.total_processes, 1,
             "exactly one process was ever assigned to this job"

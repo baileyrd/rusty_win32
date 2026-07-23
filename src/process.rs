@@ -2017,7 +2017,7 @@ mod tests {
         // resumed.
         unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
 
-        let thread_handle = open_thread(spawned.thread_id, THREAD_QUERY_INFORMATION)
+        let thread_handle = open_thread(spawned.thread_id, THREAD_QUERY_INFORMATION | SYNCHRONIZE)
             .expect("OpenThread should succeed for a live thread id this test itself just started");
 
         // SAFETY: `thread_handle` is a freshly opened, valid handle with
@@ -2031,9 +2031,19 @@ mod tests {
         unsafe { terminate(spawned.process, 7) }.expect("TerminateProcess should succeed");
         // SAFETY: still the same valid handle.
         unsafe { wait(spawned.process, Some(5_000)) }.unwrap();
+        // The process object becoming signaled doesn't guarantee
+        // `GetExitCodeThread` already reflects the thread's final exit
+        // code — Windows doesn't document those two transitions as
+        // atomic with each other, and this raced under CI. Explicitly
+        // wait on `thread_handle` itself (needs `SYNCHRONIZE`, added
+        // above) to close that window before reading the exit code.
+        // SAFETY: `thread_handle` is a valid, currently-open handle with
+        // SYNCHRONIZE.
+        unsafe { crate::handle::wait_single_ex(thread_handle, Some(5_000), false) }
+            .expect("WaitForSingleObjectEx should succeed waiting on the thread handle");
 
-        // SAFETY: same handle, now that the process (and its only thread)
-        // has exited.
+        // SAFETY: same handle, now that the thread itself has been waited
+        // on and confirmed signaled.
         let code = unsafe { thread_exit_code(thread_handle) }
             .expect("GetExitCodeThread should succeed after the thread has exited");
         assert_eq!(code, 7);
