@@ -92,6 +92,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   run — another parity-loop find.
 - `fs::copy_file` (`CopyFileW`), the primitive behind a `cp` builtin —
   another parity-loop find.
+- `fs::move_file` (`MoveFileExW`) plus `MOVEFILE_REPLACE_EXISTING`/
+  `MOVEFILE_COPY_ALLOWED`, the primitive behind an `mv` builtin (covering
+  cross-volume moves, unlike `std::fs::rename` on Windows) — another
+  parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
