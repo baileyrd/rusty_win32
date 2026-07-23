@@ -6,6 +6,18 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #53 — job: narrow process_ids to Vec<u32>, matching every other pid in this crate
+**2026-07-23** · [#53](https://github.com/baileyrd/rusty_win32/pull/53)
+
+- **Changed:** `job::process_ids` now returns `Vec<u32>` instead of
+  `Vec<usize>` — closes the round-2 assessment's API-consistency wart.
+  Every other pid-carrying value in the public surface (`ProcessEntry.pid`,
+  `JobMessage.pid`, `SpawnedProcess.process_id`, `open_by_pid`'s parameter)
+  was already `u32`; `process_ids` alone exposed the raw
+  `JOBOBJECT_BASIC_PROCESS_ID_LIST` wire format's pointer-sized
+  (`ULONG_PTR`) width, which exists for struct alignment, not because a
+  pid is ever wider than 32 bits. Breaking, pre-1.0.
+
 ## PR #52 — Add watch module: filesystem change notification (ReadDirectoryChangesW)
 **2026-07-23** · [#52](https://github.com/baileyrd/rusty_win32/pull/52)
 

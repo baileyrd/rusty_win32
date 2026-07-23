@@ -406,10 +406,18 @@ pub unsafe fn terminate(job: RawHandle, exit_code: u32) -> Result<(), Win32Error
 /// Unix `SIGCHLD` (see rush's `docs/WINDOWS_JOB_CONTROL.md` for the
 /// polling-vs-completion-port discussion).
 ///
+/// Returns `Vec<u32>`, matching every other pid-carrying value in this
+/// crate's public surface (`ProcessEntry.pid`, `JobMessage.pid`,
+/// `SpawnedProcess.process_id`, `open_by_pid`'s parameter) — the raw
+/// `JOBOBJECT_BASIC_PROCESS_ID_LIST` wire format Windows reports is
+/// pointer-sized (`ULONG_PTR`, for struct alignment, not because a pid is
+/// ever wider than 32 bits), narrowed here rather than leaking that
+/// internal width into this function's own return type.
+///
 /// # Safety
 ///
 /// `job` must be a currently-open, valid Job Object handle.
-pub unsafe fn process_ids(job: RawHandle) -> Result<Vec<usize>, Win32Error> {
+pub unsafe fn process_ids(job: RawHandle) -> Result<Vec<u32>, Win32Error> {
     const HEADER_LEN: usize = 8; // NumberOfAssignedProcesses + NumberOfProcessIdsInList
     let mut capacity: u32 = 32;
     loop {
@@ -448,7 +456,10 @@ pub unsafe fn process_ids(job: RawHandle) -> Result<Vec<usize>, Win32Error> {
             unsafe { core::ptr::read_unaligned(buf.as_ptr().add(4).cast::<u32>()) } as usize;
         let pids_ptr = unsafe { buf.as_ptr().add(HEADER_LEN).cast::<usize>() };
         let pids = unsafe { core::slice::from_raw_parts(pids_ptr, in_list) };
-        return Ok(pids.to_vec());
+        // Narrowing `usize` (the wire format's native pointer width) to
+        // `u32` (every other pid in this crate) — safe for any real pid,
+        // which Windows itself never assigns above 32 bits.
+        return Ok(pids.iter().map(|&pid| pid as u32).collect());
     }
 }
 
@@ -811,7 +822,7 @@ mod tests {
         // SAFETY: `job` is a valid handle with exactly one assigned process.
         let ids_before =
             unsafe { process_ids(job) }.expect("QueryInformationJobObject should succeed");
-        assert_eq!(ids_before, alloc::vec![spawned.process_id as usize]);
+        assert_eq!(ids_before, alloc::vec![spawned.process_id]);
 
         // SAFETY: `job` is a valid handle; this is the operation under
         // test.
