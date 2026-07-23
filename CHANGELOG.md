@@ -11,6 +11,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `process::times` (`GetProcessTimes`), CPU-time accounting for a process
   handle — creation/exit wall-clock timestamps plus kernel/user elapsed
   duration.
+- `job::set_resource_limits`/`job::limits` (memory/CPU-time/active-process
+  Job Object limits) and `job::accounting`
+  (`JobObjectBasicAndIoAccountingInformation`), the narrow subset of `ulimit`
+  a Job Object can enforce, plus lifetime CPU/IO accounting.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

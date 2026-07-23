@@ -17,7 +17,7 @@ use crate::error::Win32Error;
 /// A `timespec`-equivalent: seconds plus a sub-second remainder in
 /// nanoseconds (`0..1_000_000_000`), matching `rusty_libc`'s own
 /// `Timespec` shape for symmetry across the two crates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Timespec {
     pub secs: i64,
     pub nanos: u32,
