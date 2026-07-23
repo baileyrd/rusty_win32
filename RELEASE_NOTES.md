@@ -6,6 +6,16 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #105 — process: add computer_name (GetComputerNameW)
+**2026-07-23** · [#105](https://github.com/baileyrd/rusty_win32/pull/105)
+
+- **Added:** `process::computer_name` (`GetComputerNameW`), closing issue
+  #72 from the parity-loop sweep — the primitive behind `$HOSTNAME`, a
+  shell prompt, or a `hostname` builtin. Adds
+  `Win32Error::ERROR_BUFFER_OVERFLOW` (111), needed to distinguish the
+  documented "buffer too small, retry with the reported exact size"
+  failure from a real error.
+
 ## PR #104 — process: add logical_processor_count (GetSystemInfo)
 **2026-07-23** · [#104](https://github.com/baileyrd/rusty_win32/pull/104)
 

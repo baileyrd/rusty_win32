@@ -82,6 +82,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `process::logical_processor_count` (`GetSystemInfo`'s
   `dwNumberOfProcessors`), the primitive behind an `nproc`-equivalent
   builtin — another parity-loop find.
+- `process::computer_name` (`GetComputerNameW`), the primitive behind
+  `$HOSTNAME`/a `hostname` builtin — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
