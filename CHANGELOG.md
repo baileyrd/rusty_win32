@@ -36,6 +36,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
+- `job::process_ids` now returns `Vec<u32>` instead of `Vec<usize>`,
+  matching every other pid-carrying value in this crate (breaking,
+  pre-1.0).
 ### Fixed
 ### Security
 
