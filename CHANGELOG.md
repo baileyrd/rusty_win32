@@ -84,6 +84,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   builtin — another parity-loop find.
 - `process::computer_name` (`GetComputerNameW`), the primitive behind
   `$HOSTNAME`/a `hostname` builtin — another parity-loop find.
+- `process::memory_status` (`GlobalMemoryStatusEx`), system-wide memory
+  totals/load for a `free`-style builtin — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
