@@ -6,6 +6,24 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #230 — security: add sid_to_string/string_to_sid
+**2026-07-23** · [#230](https://github.com/baileyrd/rusty_win32/pull/230)
+
+- **Added:** `security::sid_to_string`/`security::string_to_sid`
+  (`ConvertSidToStringSidW`/`ConvertStringSidToSidW`), closing issue #159 —
+  a SID's `S-1-5-...` string form, the fallback `icacls` itself uses when
+  a SID can't be resolved to a name at all (orphaned/foreign/deleted
+  account) — see PR #229's `lookup_account_sid` for the name-resolving
+  path this is a fallback from. `sid_to_string` frees
+  `ConvertSidToStringSidW`'s own output buffer via `LocalFree` before
+  returning, so the result is an ordinary owned `String` rather than
+  another `LocalFree`-on-`Drop` wrapper. `string_to_sid` returns a new
+  `ConvertedSid` type (freeing the parsed `PSID` via `LocalFree` on
+  `Drop`, matching `BuiltAcl`'s existing pattern) since this crate has no
+  `GetLengthSid` yet (a later round-2 item) to copy the SID's bytes into
+  an owned `SidBuf` instead. Also added `Win32Error::ERROR_INVALID_SID`
+  (`1337`), needed for `string_to_sid`'s malformed-input error path.
+
 ## PR #229 — security: add lookup_account_sid/lookup_account_name
 **2026-07-23** · [#229](https://github.com/baileyrd/rusty_win32/pull/229)
 
