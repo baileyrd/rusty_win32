@@ -235,6 +235,11 @@ unsafe extern "system" {
     ) -> i32;
     fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
     fn DeleteFileW(file_name: *const u16) -> i32;
+    fn CreateDirectoryW(
+        path_name: *const u16,
+        security_attributes: *const core::ffi::c_void,
+    ) -> i32;
+    fn RemoveDirectoryW(path_name: *const u16) -> i32;
 }
 
 /// `MoveFileExW`'s `dwFlags` bit: overwrite `to` if it already exists
@@ -444,6 +449,37 @@ pub fn delete_file(path: &str) -> Result<(), Win32Error> {
     let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
     // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string.
     let ok = unsafe { DeleteFileW(wide.as_ptr()) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
+/// Create a directory at `path` — `CreateDirectoryW`, the primitive behind
+/// an `mkdir` builtin. Only creates the final path component (unlike `mkdir
+/// -p`); every parent directory must already exist.
+pub fn create_directory(path: &str) -> Result<(), Win32Error> {
+    let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string;
+    // `security_attributes = NULL` requests default (non-inheritable)
+    // security attributes, a documented valid input.
+    let ok = unsafe { CreateDirectoryW(wide.as_ptr(), core::ptr::null()) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
+/// Remove the directory at `path` — `RemoveDirectoryW`, the primitive
+/// behind an `rmdir` builtin. `path` must name an empty directory; Windows
+/// refuses to remove one with any contents (no `rm -rf`-style recursive
+/// behavior here).
+pub fn remove_directory(path: &str) -> Result<(), Win32Error> {
+    let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string.
+    let ok = unsafe { RemoveDirectoryW(wide.as_ptr()) };
     if ok == 0 {
         Err(Win32Error::last())
     } else {
@@ -1007,5 +1043,29 @@ mod tests {
     fn delete_file_fails_for_a_nonexistent_file() {
         let err = delete_file(r"C:\this-file-should-not-exist-rusty-win32-test.txt").unwrap_err();
         assert_eq!(err, Win32Error::ERROR_FILE_NOT_FOUND);
+    }
+
+    #[test]
+    fn create_directory_then_remove_directory_round_trips() {
+        let dir = std::env::temp_dir().join("rusty_win32_create_remove_dir_test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        create_directory(dir.to_str().unwrap()).expect("CreateDirectoryW should succeed");
+        assert!(dir.is_dir(), "the directory should exist after creation");
+
+        remove_directory(dir.to_str().unwrap()).expect("RemoveDirectoryW should succeed");
+        assert!(!dir.exists(), "the directory should no longer exist");
+    }
+
+    #[test]
+    fn create_directory_fails_when_it_already_exists() {
+        let dir = std::env::temp_dir().join("rusty_win32_create_dir_exists_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).expect("creating the test directory should succeed");
+
+        let err = create_directory(dir.to_str().unwrap()).unwrap_err();
+        assert_eq!(err, Win32Error::ERROR_ALREADY_EXISTS);
+
+        std::fs::remove_dir_all(&dir).expect("cleaning up the test directory should succeed");
     }
 }

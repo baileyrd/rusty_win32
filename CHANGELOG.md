@@ -98,6 +98,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   parity-loop find.
 - `fs::delete_file` (`DeleteFileW`), the primitive behind an `rm` builtin —
   another parity-loop find.
+- `fs::create_directory`/`fs::remove_directory`
+  (`CreateDirectoryW`/`RemoveDirectoryW`), the primitives behind
+  `mkdir`/`rmdir` builtins — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

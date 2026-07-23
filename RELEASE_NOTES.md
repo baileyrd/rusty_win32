@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #111 — fs: add create_directory/remove_directory (CreateDirectoryW/RemoveDirectoryW)
+**2026-07-23** · [#111](https://github.com/baileyrd/rusty_win32/pull/111)
+
+- **Added:** `fs::create_directory`/`fs::remove_directory`
+  (`CreateDirectoryW`/`RemoveDirectoryW`), closing issue #78 from the
+  parity-loop sweep — the primitives behind `mkdir`/`rmdir` builtins.
+  `create_directory` only creates the final path component (no `mkdir -p`
+  behavior); `remove_directory` requires an empty directory (no `rm -rf`
+  recursion). Filed for tracking, not urgency: `rush` has no `mkdir`/`rmdir`
+  builtins today.
+
 ## PR #110 — fs: add delete_file (DeleteFileW)
 **2026-07-23** · [#110](https://github.com/baileyrd/rusty_win32/pull/110)
 
