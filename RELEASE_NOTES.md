@@ -6,6 +6,20 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #214 — registry: add open_key/close_key
+**2026-07-23** · [#214](https://github.com/baileyrd/rusty_win32/pull/214)
+
+- **Added:** `registry::open_key`/`registry::close_key` (`RegOpenKeyExW`/
+  `RegCloseKey`), closing issue #143 — open a subkey of a predefined root
+  (or another already-open key), and close it again. `RegOpenKeyExW`
+  reports failure via its own `LSTATUS` return value directly rather than
+  `GetLastError`, so this maps straight through `Win32Error::from_raw`
+  instead of `Win32Error::last()`. Also adds `KEY_READ`/`KEY_WRITE`/
+  `KEY_ALL_ACCESS`/`KEY_QUERY_VALUE` REGSAM access-mask constants
+  (`access: u32`'s bitmask, needed by `open_key` and every later registry
+  call taking one), verified against mingw-w64's real `winnt.h` macros
+  with a compiled `_Static_assert` probe.
+
 ## PR #213 — registry: add HKey type + predefined root keys
 **2026-07-23** · [#213](https://github.com/baileyrd/rusty_win32/pull/213)
 
