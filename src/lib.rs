@@ -220,6 +220,13 @@
 //! no Unix analog at all) flagged for completeness rather than because any
 //! current `rush`/`rusty_lines` call site needs it yet.
 //!
+//! [`path::short_path`]/[`path::long_path`] (`GetShortPathNameW`/
+//! `GetLongPathNameW`) close the round-2 assessment's last speculative
+//! item: normalizing between a legacy 8.3 short name and its long form — a
+//! rare but real source of path-comparison surprises this crate's
+//! reparse-point-aware [`fs::final_path`] doesn't otherwise cover, again
+//! with no known consumer today.
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or
@@ -271,7 +278,7 @@ pub use time::{Timespec, now_monotonic, now_realtime};
 #[cfg(windows)]
 pub mod path;
 #[cfg(windows)]
-pub use path::{resolve_command, search_path};
+pub use path::{long_path, resolve_command, search_path, short_path};
 
 // `fs`'s several-item surface (two functions, two result structs, and the
 // `FILE_ATTRIBUTE_*` constants) is deliberately not re-exported at the
