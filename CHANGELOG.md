@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `registry` module (new subsystem): `HKey` type plus the five predefined
+  root keys (`HKEY_CLASSES_ROOT`/`HKEY_CURRENT_USER`/`HKEY_LOCAL_MACHINE`/
+  `HKEY_USERS`/`HKEY_CURRENT_CONFIG`), the first piece of Windows Registry
+  access — previously excluded by this crate's own non-goals, now in scope
+  per explicit round-2 direction (`gap-analysis.md`).
 - `console::largest_window_size`/`console::set_screen_buffer_size`/
   `console::set_window_info` (`GetLargestConsoleWindowSize`/
   `SetConsoleScreenBufferSize`/`SetConsoleWindowInfo`) plus public

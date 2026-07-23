@@ -325,3 +325,12 @@ pub mod volume;
 // `job`'s/`fs`'s/`pipe`'s/`volume`'s — reach it via `rusty_win32::watch::*`.
 #[cfg(windows)]
 pub mod watch;
+
+// `registry` is a brand-new round-2 subsystem (previously excluded by this
+// crate's own non-goals — see `gap-analysis.md`'s "Round 2: previously
+// out-of-scope subsystems" sweep), starting from just the `HKey` type and
+// the five predefined root keys. Not re-exported at the crate root, for
+// the same reason as `job`'s/`fs`'s/`pipe`'s/`volume`'s/`watch`'s — reach
+// it via `rusty_win32::registry::*`.
+#[cfg(windows)]
+pub mod registry;

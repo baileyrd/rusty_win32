@@ -6,6 +6,23 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #213 — registry: add HKey type + predefined root keys
+**2026-07-23** · [#213](https://github.com/baileyrd/rusty_win32/pull/213)
+
+- **Added:** new `registry` module — `HKey` (`*mut c_void`, distinct from
+  `handle::RawHandle` since a registry key closes via `RegCloseKey`, not
+  `CloseHandle`) plus the five predefined root keys
+  (`HKEY_CLASSES_ROOT`/`HKEY_CURRENT_USER`/`HKEY_LOCAL_MACHINE`/
+  `HKEY_USERS`/`HKEY_CURRENT_CONFIG`), closing issue #142. These are
+  sign-extended 64-bit sentinel pointer values (Windows defines each as a
+  32-bit signed `LONG` widened to pointer size — `0x80000000` as `LONG` is
+  negative, so the real bit pattern is `0xFFFFFFFF80000000`, not
+  `0x0000000080000000`) — verified against mingw-w64's own `winreg.h`
+  macros with a compiled `_Static_assert` probe. First piece of a brand-new
+  subsystem previously excluded by this crate's own non-goals, now in
+  scope per explicit round-2 direction (`gap-analysis.md`); the actual
+  open/query/set/delete surface is follow-up work.
+
 ## PR #212 — console: add screen-buffer/window write side (GetLargestConsoleWindowSize/SetConsoleScreenBufferSize/SetConsoleWindowInfo)
 **2026-07-23** · [#212](https://github.com/baileyrd/rusty_win32/pull/212)
 
