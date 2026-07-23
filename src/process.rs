@@ -2387,7 +2387,7 @@ mod tests {
         // resumed.
         unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
 
-        let thread_handle = open_thread(spawned.thread_id, THREAD_QUERY_INFORMATION)
+        let thread_handle = open_thread(spawned.thread_id, THREAD_QUERY_INFORMATION | SYNCHRONIZE)
             .expect("OpenThread should succeed for a live thread id this test itself just started");
 
         // Queried before waiting for the exit — `cmd.exe /c exit 0` may
@@ -2404,8 +2404,19 @@ mod tests {
 
         // SAFETY: `spawned.process` is still the same valid handle.
         unsafe { wait(spawned.process, None) }.unwrap();
+        // The process handle becoming signaled doesn't guarantee
+        // GetThreadTimes' `exit` field is already populated for the
+        // thread itself — the same race already fixed for
+        // `thread_exit_code_reports_still_active_then_the_real_code`.
+        // Explicitly wait on the thread handle (needs `SYNCHRONIZE`,
+        // added above) to close that window.
+        // SAFETY: `thread_handle` is a valid, currently-open handle with
+        // SYNCHRONIZE.
+        unsafe { crate::handle::wait_single_ex(thread_handle, Some(5_000), false) }
+            .expect("WaitForSingleObjectEx should succeed waiting on the thread handle");
 
-        // SAFETY: same valid handle, now that the thread has exited.
+        // SAFETY: same valid handle, now that the thread itself has been
+        // waited on and confirmed signaled.
         let after = unsafe { thread_times(thread_handle) }.expect("GetThreadTimes should succeed");
         assert!(
             after.exit.secs > 1_700_000_000,
