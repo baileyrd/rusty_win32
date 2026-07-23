@@ -6,6 +6,16 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #98 — console: add flush_input (FlushConsoleInputBuffer)
+**2026-07-23** · [#98](https://github.com/baileyrd/rusty_win32/pull/98)
+
+- **Added:** `console::flush_input` (`FlushConsoleInputBuffer`), closing
+  issue #65 from the parity-loop sweep. Discards every currently-queued,
+  not-yet-read input event on a console input handle — dropping stale
+  keystrokes buffered during a slow command so they don't replay into the
+  next prompt, most noticeable right after `Ctrl-C` interrupts something
+  while a user kept typing.
+
 ## PR #97 — console: add fill_char/fill_attribute (FillConsoleOutputCharacterW/FillConsoleOutputAttribute)
 **2026-07-23** · [#97](https://github.com/baileyrd/rusty_win32/pull/97)
 

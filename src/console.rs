@@ -74,6 +74,7 @@ unsafe extern "system" {
         write_coord: Coord,
         number_of_attrs_written: *mut u32,
     ) -> i32;
+    fn FlushConsoleInputBuffer(console_input: RawHandle) -> i32;
     fn WaitForSingleObject(handle: RawHandle, milliseconds: u32) -> u32;
     fn WriteConsoleInputW(
         console_input: RawHandle,
@@ -629,6 +630,26 @@ pub unsafe fn fill_attribute(
     }
 }
 
+/// Discard every currently-queued, not-yet-read input event on
+/// `console_input` — `FlushConsoleInputBuffer`. Needed for dropping stale
+/// keystrokes buffered during a slow command so they don't replay into the
+/// next prompt, most noticeable right after `Ctrl-C` interrupts something
+/// while a user kept typing.
+///
+/// # Safety
+///
+/// `console_input` must be a currently-open, valid console input handle.
+pub unsafe fn flush_input(console_input: RawHandle) -> Result<(), Win32Error> {
+    // SAFETY: `console_input` is caller-supplied per this function's own
+    // safety contract.
+    let ok = unsafe { FlushConsoleInputBuffer(console_input) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
 /// Synthesize `text` as a sequence of real console key events —
 /// `WriteConsoleInputW`, the standard, documented technique console
 /// automation tools use to inject keystrokes (queues `INPUT_RECORD`s into
@@ -977,6 +998,30 @@ mod tests {
         assert!(
             !ready,
             "no input was queued, so a zero-timeout wait must report not-ready"
+        );
+    }
+
+    #[test]
+    fn flush_input_discards_queued_keystrokes() {
+        let stdin = ensure_console_stdin();
+
+        // SAFETY: `stdin` is a real, valid console input handle.
+        unsafe { write_char_events(stdin, "a") }.expect("WriteConsoleInputW should succeed");
+        // SAFETY: same handle.
+        let ready_before =
+            unsafe { wait_readable(stdin, 0) }.expect("WaitForSingleObject should succeed");
+        assert!(ready_before, "queued input should make the handle ready");
+
+        // SAFETY: `stdin` is a valid console input handle; this is the
+        // operation under test.
+        unsafe { flush_input(stdin) }.expect("FlushConsoleInputBuffer should succeed");
+
+        // SAFETY: same handle.
+        let ready_after =
+            unsafe { wait_readable(stdin, 0) }.expect("WaitForSingleObject should succeed");
+        assert!(
+            !ready_after,
+            "flushing should discard the queued keystrokes"
         );
     }
 
