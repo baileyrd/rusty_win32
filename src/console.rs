@@ -43,6 +43,7 @@ pub type HandlerRoutine = extern "system" fn(ctrl_type: u32) -> i32;
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn SetConsoleCtrlHandler(handler_routine: Option<HandlerRoutine>, add: i32) -> i32;
+    fn GenerateConsoleCtrlEvent(ctrl_event: u32, process_group_id: u32) -> i32;
     fn GetConsoleMode(console_handle: RawHandle, mode: *mut u32) -> i32;
     fn SetConsoleMode(console_handle: RawHandle, mode: u32) -> i32;
     fn ReadFile(
@@ -235,6 +236,33 @@ pub fn remove_ctrl_handler(handler: HandlerRoutine) -> Result<(), Win32Error> {
     // SAFETY: see `install_ctrl_handler`; `add = FALSE` (0) removes rather
     // than adds.
     let ok = unsafe { SetConsoleCtrlHandler(Some(handler), 0) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
+/// Deliver `ctrl_event` (one of the `CTRL_*_EVENT` constants above) to every
+/// process attached to the console that shares `process_group_id` —
+/// `GenerateConsoleCtrlEvent`, the counterpart to [`install_ctrl_handler`]
+/// on the *sending* side: interrupting a specific child rather than reacting
+/// to an interrupt this process received.
+///
+/// **`process_group_id` only actually scopes [`CTRL_BREAK_EVENT`].** Windows
+/// documents `GenerateConsoleCtrlEvent` as failing with
+/// `ERROR_INVALID_PARAMETER` for [`CTRL_C_EVENT`] whenever `process_group_id`
+/// is nonzero — `CTRL_C_EVENT` can only ever be broadcast to every process
+/// sharing the console (`process_group_id == 0`), never targeted at one
+/// group. To interrupt just one child process group (e.g. one started with
+/// [`crate::process::spawn_suspended`]'s `new_process_group` set), send
+/// [`CTRL_BREAK_EVENT`] to its `process_id` instead — this function doesn't
+/// pre-validate or silently substitute one event for the other, the same way
+/// this crate's other thin wrappers surface the real call's own documented
+/// failure rather than inventing a distinct one for the same condition.
+pub fn generate_ctrl_event(ctrl_event: u32, process_group_id: u32) -> Result<(), Win32Error> {
+    // SAFETY: both arguments are plain values, not pointers.
+    let ok = unsafe { GenerateConsoleCtrlEvent(ctrl_event, process_group_id) };
     if ok == 0 {
         Err(Win32Error::last())
     } else {
@@ -574,6 +602,21 @@ mod tests {
             0
         }
         assert!(remove_ctrl_handler(never_installed).is_err());
+    }
+
+    #[test]
+    fn ctrl_c_event_cannot_be_scoped_to_a_process_group() {
+        // The documented Win32 constraint this module's own doc comment
+        // calls out: `CTRL_C_EVENT` can only ever be broadcast console-wide
+        // (`process_group_id == 0`) — passing any nonzero group id fails
+        // with `ERROR_INVALID_PARAMETER`, the same way `wait_any` surfaces
+        // `WaitForMultipleObjects`'s own documented limit rather than this
+        // crate pre-validating and inventing a distinct error. A made-up,
+        // certainly-nonexistent group id is used here since the failure is
+        // about the *event type*/*nonzero-ness* combination, not about
+        // whether the id names a real group.
+        let err = generate_ctrl_event(CTRL_C_EVENT, 0xFFFF).unwrap_err();
+        assert_eq!(err, Win32Error::ERROR_INVALID_PARAMETER);
     }
 
     #[test]

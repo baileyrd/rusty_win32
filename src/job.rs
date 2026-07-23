@@ -492,9 +492,10 @@ mod tests {
         // SAFETY: a hand-built, correctly quoted command line for a
         // well-known long-running system command — this test terminates it
         // via the job before it would exit on its own.
-        let spawned =
-            unsafe { process::spawn_suspended("cmd.exe /c ping -n 30 127.0.0.1 >nul", true, None) }
-                .expect("CreateProcessW should succeed");
+        let spawned = unsafe {
+            process::spawn_suspended("cmd.exe /c ping -n 30 127.0.0.1 >nul", true, false, None)
+        }
+        .expect("CreateProcessW should succeed");
 
         // SAFETY: `job`/`spawned.process` are both freshly created, valid
         // handles; assignment happens before `resume`, so job membership is
@@ -534,7 +535,7 @@ mod tests {
 
         // SAFETY: a hand-built, correctly quoted command line for a
         // well-known system binary.
-        let spawned = unsafe { process::spawn_suspended("cmd.exe /c exit 3", false, None) }
+        let spawned = unsafe { process::spawn_suspended("cmd.exe /c exit 3", false, false, None) }
             .expect("CreateProcessW should succeed");
         // SAFETY: `job`/`spawned.process` are both freshly created, valid
         // handles; assignment happens before `resume`.
@@ -575,7 +576,7 @@ mod tests {
 
         // SAFETY: a hand-built, correctly quoted command line for a
         // well-known system binary.
-        let spawned = unsafe { process::spawn_suspended("cmd.exe /c exit 5", false, None) }
+        let spawned = unsafe { process::spawn_suspended("cmd.exe /c exit 5", false, false, None) }
             .expect("CreateProcessW should succeed");
         // SAFETY: `job`/`spawned.process` are both freshly created, valid
         // handles; assignment happens before `resume`.
