@@ -36,7 +36,27 @@ unsafe extern "system" {
         result: *mut HKey,
     ) -> i32;
     fn RegCloseKey(key: HKey) -> i32;
+    fn RegCreateKeyExW(
+        key: HKey,
+        sub_key: *const u16,
+        reserved: u32,
+        class: *mut u16,
+        options: u32,
+        sam_desired: u32,
+        security_attributes: *const core::ffi::c_void,
+        result: *mut HKey,
+        disposition: *mut u32,
+    ) -> i32;
 }
+
+/// `RegCreateKeyExW`'s `dwOptions`: an ordinary, disk-persisted key —
+/// this crate's only supported option (`REG_OPTION_VOLATILE`/
+/// `REG_OPTION_BACKUP_RESTORE`/etc. are out of scope, same as this
+/// crate's other modules only covering the common case).
+const REG_OPTION_NON_VOLATILE: u32 = 0x0000_0000;
+/// `RegCreateKeyExW`'s `lpdwDisposition` out-values — verified against
+/// mingw-w64's own `winnt.h` macros.
+const REG_OPENED_EXISTING_KEY: u32 = 0x0000_0002;
 
 /// `REGSAM` access-mask bits for [`open_key`] (and every later registry
 /// call taking an `access: u32`) — exposed raw and policy-free, matching
@@ -135,6 +155,64 @@ pub unsafe fn close_key(key: HKey) -> Result<(), crate::error::Win32Error> {
     }
 }
 
+/// Which of the two things [`create_key`] actually did —
+/// `RegCreateKeyExW`'s `lpdwDisposition` out-parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyDisposition {
+    /// The subkey didn't already exist; this call created it.
+    CreatedNewKey,
+    /// The subkey already existed; this call just opened it, same as
+    /// [`open_key`] would have.
+    OpenedExistingKey,
+}
+
+/// Open `subkey` under `parent`, creating it first if it doesn't already
+/// exist — `RegCreateKeyExW`, an idempotent "ensure this key exists" in
+/// one call rather than an [`open_key`] a caller would otherwise have to
+/// fall back from on `ERROR_FILE_NOT_FOUND`. The returned
+/// [`KeyDisposition`] reports which of the two actually happened.
+///
+/// # Safety
+///
+/// `parent` must be a currently-valid `HKey` — one of the predefined
+/// roots in this module, or a key [`open_key`]/this function previously
+/// returned that hasn't been closed yet.
+pub unsafe fn create_key(
+    parent: HKey,
+    subkey: &str,
+    access: u32,
+) -> Result<(HKey, KeyDisposition), crate::error::Win32Error> {
+    let wide: Vec<u16> = subkey.encode_utf16().chain(core::iter::once(0)).collect();
+    let mut result: HKey = core::ptr::null_mut();
+    let mut disposition: u32 = 0;
+    // SAFETY: `parent` is caller-supplied per this function's own safety
+    // contract; `wide` is a valid, NUL-terminated UTF-16 string live for
+    // the whole call; `result`/`disposition` are valid out-pointers;
+    // `class`/`security_attributes` are documented-optional and null here.
+    let status = unsafe {
+        RegCreateKeyExW(
+            parent,
+            wide.as_ptr(),
+            0,
+            core::ptr::null_mut(),
+            REG_OPTION_NON_VOLATILE,
+            access,
+            core::ptr::null(),
+            &mut result,
+            &mut disposition,
+        )
+    };
+    if status != 0 {
+        return Err(crate::error::Win32Error::from_raw(status as u32));
+    }
+    let disposition = if disposition == REG_OPENED_EXISTING_KEY {
+        KeyDisposition::OpenedExistingKey
+    } else {
+        KeyDisposition::CreatedNewKey
+    };
+    Ok((result, disposition))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +275,35 @@ mod tests {
         }
         .expect_err("RegOpenKeyExW should fail for a nonexistent subkey");
         assert_eq!(err, crate::error::Win32Error::ERROR_FILE_NOT_FOUND);
+    }
+
+    #[test]
+    fn create_key_reports_created_then_opened_disposition() {
+        // `HKEY_CURRENT_USER\Software` is writable by an ordinary,
+        // non-elevated process — unlike `HKEY_LOCAL_MACHINE`, which
+        // `open_key`'s tests above only ever read from.
+        let subkey = "Software\\rusty_win32_registry_test_create_key";
+
+        // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid root.
+        let (first, first_disposition) =
+            unsafe { create_key(HKEY_CURRENT_USER, subkey, KEY_ALL_ACCESS) }
+                .expect("RegCreateKeyExW should succeed creating a new subkey");
+        assert!(!first.is_null());
+        assert_eq!(first_disposition, KeyDisposition::CreatedNewKey);
+        // SAFETY: `first` was just opened above and not yet closed.
+        unsafe { close_key(first) }.expect("RegCloseKey should succeed");
+
+        // Calling it again on the exact same subkey — which the call
+        // above just made exist — should report the other disposition,
+        // deterministically regardless of what order tests in this
+        // module happen to run in.
+        // SAFETY: same predefined root.
+        let (second, second_disposition) =
+            unsafe { create_key(HKEY_CURRENT_USER, subkey, KEY_ALL_ACCESS) }
+                .expect("RegCreateKeyExW should succeed opening the now-existing subkey");
+        assert!(!second.is_null());
+        assert_eq!(second_disposition, KeyDisposition::OpenedExistingKey);
+        // SAFETY: `second` was just opened above and not yet closed.
+        unsafe { close_key(second) }.expect("RegCloseKey should succeed");
     }
 }

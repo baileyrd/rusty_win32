@@ -6,6 +6,18 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #215 — registry: add create_key
+**2026-07-23** · [#215](https://github.com/baileyrd/rusty_win32/pull/215)
+
+- **Added:** `registry::create_key` (`RegCreateKeyExW`) plus
+  `KeyDisposition` (`CreatedNewKey`/`OpenedExistingKey`), closing issue
+  #144 — open-or-create in one call, reporting via the returned
+  disposition which one happened; an idempotent "ensure this key exists"
+  a caller would otherwise build by falling back from `open_key`'s
+  `ERROR_FILE_NOT_FOUND`. `REG_CREATED_NEW_KEY`/`REG_OPENED_EXISTING_KEY`/
+  `REG_OPTION_NON_VOLATILE` verified against mingw-w64's real `winnt.h`
+  macros.
+
 ## PR #214 — registry: add open_key/close_key
 **2026-07-23** · [#214](https://github.com/baileyrd/rusty_win32/pull/214)
 
