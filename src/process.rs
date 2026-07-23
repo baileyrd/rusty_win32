@@ -114,6 +114,7 @@ unsafe extern "system" {
         system_affinity_mask: *mut usize,
     ) -> i32;
     fn SetProcessAffinityMask(process: RawHandle, process_affinity_mask: usize) -> i32;
+    fn GetExitCodeThread(thread: RawHandle, exit_code: *mut u32) -> i32;
     fn QueryFullProcessImageNameW(
         process: RawHandle,
         flags: u32,
@@ -173,6 +174,10 @@ const _: () = assert!(core::mem::offset_of!(ThreadEntry32, dw_flags) == 24);
 /// `OpenThread`'s access-rights bit letting the returned handle be passed
 /// to [`suspend_thread`]/[`resume`].
 pub const THREAD_SUSPEND_RESUME: u32 = 0x0002;
+
+/// `OpenThread`'s access-rights bit letting the returned handle be passed
+/// to [`thread_exit_code`].
+pub const THREAD_QUERY_INFORMATION: u32 = 0x0040;
 
 /// `CreateToolhelp32Snapshot`'s `dwFlags`: include every process currently
 /// running in the snapshot.
@@ -1292,6 +1297,30 @@ pub unsafe fn set_affinity(process: RawHandle, mask: usize) -> Result<(), Win32E
     }
 }
 
+/// `thread`'s exit code — `GetExitCodeThread`, the thread-level counterpart
+/// to [`wait`]'s process exit code. Unlike `wait`, this does not block: if
+/// `thread` hasn't exited yet, the returned code is `259`
+/// (`STILL_ACTIVE`), Windows' own documented sentinel for "not done" rather
+/// than a distinct error this wrapper invents — callers that need to block
+/// until the thread exits should wait on the handle first (e.g.
+/// `handle::wait_single`-style), then call this. No current `rush` feature
+/// asks for this; filed for Win32 parity.
+///
+/// # Safety
+///
+/// `thread` must be a currently-open, valid thread handle.
+pub unsafe fn thread_exit_code(thread: RawHandle) -> Result<u32, Win32Error> {
+    let mut code: u32 = 0;
+    // SAFETY: `thread` is caller-supplied per this function's own safety
+    // contract; `code` is a valid, distinct local out-pointer.
+    let ok = unsafe { GetExitCodeThread(thread, &mut code) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(code)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1885,6 +1914,48 @@ mod tests {
         unsafe { terminate(spawned.process, 0) }.expect("TerminateProcess should succeed");
         // SAFETY: still the same valid handle.
         unsafe { wait(spawned.process, Some(5_000)) }.unwrap();
+
+        // SAFETY: every handle here is valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(thread_handle).unwrap();
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+        }
+    }
+
+    #[test]
+    fn thread_exit_code_reports_still_active_then_the_real_code() {
+        const STILL_ACTIVE: u32 = 259;
+
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known long-running system command.
+        let spawned =
+            unsafe { spawn_suspended("cmd.exe /c ping -n 30 127.0.0.1 >nul", false, false, None) }
+                .expect("CreateProcessW should succeed");
+        // SAFETY: `spawned.thread` is freshly created, valid, not yet
+        // resumed.
+        unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
+
+        let thread_handle = open_thread(spawned.thread_id, THREAD_QUERY_INFORMATION)
+            .expect("OpenThread should succeed for a live thread id this test itself just started");
+
+        // SAFETY: `thread_handle` is a freshly opened, valid handle with
+        // THREAD_QUERY_INFORMATION; this is the operation under test.
+        let code = unsafe { thread_exit_code(thread_handle) }
+            .expect("GetExitCodeThread should succeed for a still-running thread");
+        assert_eq!(code, STILL_ACTIVE);
+
+        // SAFETY: `spawned.process` is a valid, currently-open handle with
+        // full access rights (CreateProcessW itself opened it).
+        unsafe { terminate(spawned.process, 7) }.expect("TerminateProcess should succeed");
+        // SAFETY: still the same valid handle.
+        unsafe { wait(spawned.process, Some(5_000)) }.unwrap();
+
+        // SAFETY: same handle, now that the process (and its only thread)
+        // has exited.
+        let code = unsafe { thread_exit_code(thread_handle) }
+            .expect("GetExitCodeThread should succeed after the thread has exited");
+        assert_eq!(code, 7);
 
         // SAFETY: every handle here is valid and each closed exactly once.
         unsafe {

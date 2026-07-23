@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #192 — process: add thread_exit_code (GetExitCodeThread)
+**2026-07-23** · [#192](https://github.com/baileyrd/rusty_win32/pull/192)
+
+- **Added:** `process::thread_exit_code` (`GetExitCodeThread`) plus
+  `THREAD_QUERY_INFORMATION`, closing issue #121 — the thread-level
+  counterpart to `wait`'s process exit code (`GetExitCodeProcess`). Reports
+  Windows' own `STILL_ACTIVE` (`259`) sentinel for a not-yet-exited thread
+  rather than inventing a distinct error. Another round-2 "weak/no clear
+  consumer" item (`gap-analysis.md`); no current `rush` feature asks for
+  this.
+
 ## PR #191 — process: add affinity/set_affinity (GetProcessAffinityMask/SetProcessAffinityMask)
 **2026-07-23** · [#191](https://github.com/baileyrd/rusty_win32/pull/191)
 

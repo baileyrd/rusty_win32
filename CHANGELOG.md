@@ -127,6 +127,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `taskset` — first of the round-2 "weak/no clear consumer" items added per
   explicit direction (`gap-analysis.md`), not because any consumer currently
   wants it.
+- `process::thread_exit_code` (`GetExitCodeThread`) plus
+  `THREAD_QUERY_INFORMATION`, the thread-level counterpart to `wait`'s
+  process exit code — another round-2 item.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
