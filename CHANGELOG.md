@@ -26,6 +26,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `GetDriveTypeW`/`GetVolumeInformationW`) — a distinctly Windows-shaped
   primitive (multi-root filesystem, no Unix analog) with no current
   consumer, added for completeness.
+- `path::short_path`/`path::long_path` (`GetShortPathNameW`/
+  `GetLongPathNameW`), normalizing between a legacy 8.3 short name and its
+  long form.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

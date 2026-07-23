@@ -30,6 +30,8 @@ unsafe extern "system" {
         buffer: *mut u16,
         file_part: *mut *mut u16,
     ) -> u32;
+    fn GetShortPathNameW(long_path: *const u16, short_path: *mut u16, buffer_length: u32) -> u32;
+    fn GetLongPathNameW(short_path: *const u16, long_path: *mut u16, buffer_length: u32) -> u32;
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -130,6 +132,64 @@ pub fn resolve_command(command: &str, pathext: &str) -> Result<Option<String>, W
     Ok(None)
 }
 
+/// Convert `path` to its legacy 8.3 short-name form (e.g.
+/// `C:\Program Files` → `C:\PROGRA~1`) — `GetShortPathNameW`. `path` must
+/// name an existing file or directory: Windows generates the short name
+/// from the real on-disk entry, not by string manipulation alone (and a
+/// volume that was formatted, or has since been configured, without
+/// 8.3-name generation reports the long name unchanged rather than
+/// failing).
+pub fn short_path(path: &str) -> Result<String, Win32Error> {
+    let wide = to_wide(path);
+    let mut buf: Vec<u16> = alloc::vec![0u16; MAX_PATH];
+    // Same two-attempt growth pattern as `search_path`: an initial
+    // `MAX_PATH`-sized try, then one retry sized exactly to whatever
+    // `GetShortPathNameW` reports as actually required.
+    for _ in 0..2 {
+        // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; `buf` is
+        // a valid, `buf.len()`-element writable buffer.
+        let needed =
+            unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+        if needed == 0 {
+            return Err(Win32Error::last());
+        }
+        if (needed as usize) > buf.len() {
+            buf.resize(needed as usize, 0);
+            continue;
+        }
+        // `GetShortPathNameW`'s returned length excludes the terminating
+        // NUL on success, the same convention `search_path` already relies
+        // on for `SearchPathW`.
+        return Ok(String::from_utf16_lossy(&buf[..needed as usize]));
+    }
+    Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
+}
+
+/// Convert `path` (which may already be a long name, an 8.3 short name, or
+/// a mix of either per path component) to its fully long-name form —
+/// `GetLongPathNameW`, the reverse of [`short_path`]. Like `short_path`,
+/// `path` must name an existing file or directory.
+pub fn long_path(path: &str) -> Result<String, Win32Error> {
+    let wide = to_wide(path);
+    let mut buf: Vec<u16> = alloc::vec![0u16; MAX_PATH];
+    // Same two-attempt growth pattern as `search_path`/`short_path`.
+    for _ in 0..2 {
+        // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; `buf` is
+        // a valid, `buf.len()`-element writable buffer.
+        let needed = unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+        if needed == 0 {
+            return Err(Win32Error::last());
+        }
+        if (needed as usize) > buf.len() {
+            buf.resize(needed as usize, 0);
+            continue;
+        }
+        // Same excludes-the-NUL convention as `short_path`/`search_path`.
+        return Ok(String::from_utf16_lossy(&buf[..needed as usize]));
+    }
+    Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +237,34 @@ mod tests {
         )
         .expect("resolution should succeed even when nothing matches");
         assert_eq!(found, None);
+    }
+
+    #[test]
+    fn short_path_of_program_files_has_no_spaces() {
+        // An 8.3 short name never contains a space by construction — a
+        // robust, version-independent assertion rather than pinning the
+        // exact generated name (`PROGRA~1` vs `PROGRA~2` depends on what
+        // else is installed on the CI runner).
+        let short = short_path(r"C:\Program Files").expect("GetShortPathNameW should succeed");
+        assert!(
+            !short.contains(' '),
+            "an 8.3 short name should never contain a space, got: {short}"
+        );
+    }
+
+    #[test]
+    fn long_path_of_the_short_form_round_trips_back_to_program_files() {
+        let short = short_path(r"C:\Program Files").expect("GetShortPathNameW should succeed");
+        let long = long_path(&short).expect("GetLongPathNameW should succeed");
+        assert!(
+            long.to_ascii_lowercase().ends_with("program files"),
+            "got: {long}"
+        );
+    }
+
+    #[test]
+    fn short_path_fails_for_a_nonexistent_path() {
+        let err = short_path(r"C:\this-path-should-not-exist-rusty-win32-test").unwrap_err();
+        assert_eq!(err, Win32Error::ERROR_FILE_NOT_FOUND);
     }
 }

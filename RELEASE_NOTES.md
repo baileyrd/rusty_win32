@@ -6,6 +6,16 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #51 — path: add short_path/long_path (GetShortPathNameW/GetLongPathNameW)
+**2026-07-23** · [#51](https://github.com/baileyrd/rusty_win32/pull/51)
+
+- **Added:** `path::short_path`/`path::long_path`, normalizing between a
+  legacy 8.3 short name (e.g. `PROGRA~1`) and its long form — closes the
+  round-2 assessment's last speculative item. A rare but real source of
+  path-comparison surprises this crate's reparse-point-aware `fs::final_path`
+  doesn't otherwise cover; no known consumer today.
+- Both reuse `search_path`'s existing two-attempt buffer-growth pattern.
+
 ## PR #50 — Add volume module: drive/volume enumeration (GetLogicalDrives/GetDriveTypeW/GetVolumeInformationW)
 **2026-07-23** · [#50](https://github.com/baileyrd/rusty_win32/pull/50)
 
