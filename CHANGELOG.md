@@ -5,6 +5,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `service::enum_services` (`EnumServicesStatusExW`) plus
+  `ServiceStatusEntry` and `SC_MANAGER_ENUMERATE_SERVICE`/`SERVICE_WIN32`/
+  `SERVICE_ACTIVE`/`SERVICE_INACTIVE`/`SERVICE_STATE_ALL` — list every
+  service known to the SCM with its current status, the core of a
+  `systemctl list-units`-equivalent. Pages internally via
+  `EnumServicesStatusExW`'s own resume-handle protocol, growing the
+  buffer only when a page can't fit even one entry.
 - `service` module (new subsystem): `service::open_manager`/
   `service::open_service`/`service::close` (`OpenSCManagerW`/
   `OpenServiceW`/`CloseServiceHandle`) plus `SC_MANAGER_CONNECT`/
