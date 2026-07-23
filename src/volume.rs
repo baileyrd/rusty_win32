@@ -84,6 +84,11 @@ unsafe extern "system" {
     fn FindFirstVolumeW(volume_name: *mut u16, buffer_length: u32) -> RawHandle;
     fn FindNextVolumeW(find_volume: RawHandle, volume_name: *mut u16, buffer_length: u32) -> i32;
     fn FindVolumeClose(find_volume: RawHandle) -> i32;
+    fn GetVolumePathNameW(
+        file_name: *const u16,
+        volume_path_name: *mut u16,
+        buffer_length: u32,
+    ) -> i32;
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -309,6 +314,23 @@ pub fn find_volumes() -> Result<FindVolumes, Win32Error> {
     })
 }
 
+/// Maps `path` (any file or directory path, not just a drive root) to the
+/// root path of the volume it's on — `GetVolumePathNameW`, the reverse
+/// direction of [`volume_information`]/[`disk_free_space`]'s own root-path
+/// parameter.
+pub fn volume_path_name(path: &str) -> Result<String, Win32Error> {
+    let wide = to_wide(path);
+    let mut buf = alloc::vec![0u16; NAME_BUFFER_LEN];
+    // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; `buf` is a
+    // valid, `NAME_BUFFER_LEN`-element writable buffer matched by the
+    // `buffer_length` argument naming its exact length.
+    let ok = unsafe { GetVolumePathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+    if ok == 0 {
+        return Err(Win32Error::last());
+    }
+    Ok(from_wide(&buf))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,5 +432,19 @@ mod tests {
                 "every entry should be a GUID volume path, got: {name:?}"
             );
         }
+    }
+
+    #[test]
+    fn volume_path_name_resolves_the_windows_directory_to_the_system_drive_root() {
+        let system_drive = std::env::var("SystemDrive")
+            .expect("SystemDrive should be set in any real Windows process's environment");
+        let windows_dir = std::env::var("SystemRoot")
+            .expect("SystemRoot should be set in any real Windows process's environment");
+        let root = volume_path_name(&windows_dir)
+            .expect("GetVolumePathNameW should succeed for a well-known existing directory");
+        assert_eq!(
+            root.to_ascii_uppercase(),
+            alloc::format!("{}\\", system_drive.to_ascii_uppercase())
+        );
     }
 }

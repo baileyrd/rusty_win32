@@ -147,6 +147,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `volume::find_volumes` (`FindFirstVolumeW`/`FindNextVolumeW`/
   `FindVolumeClose`), enumerating every volume by its stable GUID path,
   independent of drive-letter assignment — another round-2 item.
+- `volume::volume_path_name` (`GetVolumePathNameW`), mapping an arbitrary
+  path to the root path of the volume it's on — another round-2 item.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
