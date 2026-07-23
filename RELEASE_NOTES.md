@@ -6,6 +6,20 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #216 — registry: add query_value
+**2026-07-23** · [#216](https://github.com/baileyrd/rusty_win32/pull/216)
+
+- **Added:** `registry::query_value` (`RegQueryValueExW`) plus a new
+  `RegistryValue` enum (`None`/`Sz`/`ExpandSz`/`Dword`/`Qword`/`Binary`/
+  `MultiSz`), closing issue #145 — reads a value's data, decoded by its
+  real `dwType` rather than handed back as a raw byte blob plus a
+  separate type code. Uses the query-size-then-allocate idiom this crate
+  already uses elsewhere (`path::search_path`, `fs::final_path`): a first
+  call with a null data pointer reports the exact required size and type,
+  then a second call reads the data into a correctly-sized buffer.
+  `REG_SZ`/`REG_EXPAND_SZ`/`REG_BINARY`/`REG_DWORD`/`REG_MULTI_SZ`/
+  `REG_QWORD` verified against mingw-w64's real `winnt.h` macros.
+
 ## PR #215 — registry: add create_key
 **2026-07-23** · [#215](https://github.com/baileyrd/rusty_win32/pull/215)
 
