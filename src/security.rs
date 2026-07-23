@@ -57,6 +57,24 @@ unsafe extern "system" {
     ) -> u32;
     fn BuildTrusteeWithSidW(trustee: *mut Trustee, sid: *mut core::ffi::c_void);
     fn BuildTrusteeWithNameW(trustee: *mut Trustee, name: *mut u16);
+    fn LookupAccountSidW(
+        system_name: *const u16,
+        sid: *mut core::ffi::c_void,
+        name: *mut u16,
+        name_len: *mut u32,
+        referenced_domain_name: *mut u16,
+        domain_len: *mut u32,
+        sid_name_use: *mut i32,
+    ) -> i32;
+    fn LookupAccountNameW(
+        system_name: *const u16,
+        account_name: *const u16,
+        sid: *mut u8,
+        sid_len: *mut u32,
+        referenced_domain_name: *mut u16,
+        domain_len: *mut u32,
+        sid_name_use: *mut i32,
+    ) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -606,6 +624,199 @@ pub unsafe fn build_acl(
     Ok(BuiltAcl { acl: new_acl })
 }
 
+/// `SID_NAME_USE` — what kind of account [`lookup_account_sid`]/
+/// [`lookup_account_name`] resolved. Verified against mingw-w64's own
+/// `winnt.h` with a compiled `_Static_assert` probe.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidNameUse {
+    User = 1,
+    Group = 2,
+    Domain = 3,
+    Alias = 4,
+    WellKnownGroup = 5,
+    DeletedAccount = 6,
+    Invalid = 7,
+    Unknown = 8,
+    Computer = 9,
+    /// Any `SID_NAME_USE` value beyond the ones this crate names above
+    /// (`SidTypeLabel`/`SidTypeLogonSession`, both rare and outside
+    /// ordinary owner/ACE-trustee lookups) — reported rather than
+    /// silently coerced to [`Unknown`](SidNameUse::Unknown).
+    Other(i32),
+}
+
+impl SidNameUse {
+    fn from_raw(raw: i32) -> Self {
+        match raw {
+            1 => SidNameUse::User,
+            2 => SidNameUse::Group,
+            3 => SidNameUse::Domain,
+            4 => SidNameUse::Alias,
+            5 => SidNameUse::WellKnownGroup,
+            6 => SidNameUse::DeletedAccount,
+            7 => SidNameUse::Invalid,
+            8 => SidNameUse::Unknown,
+            9 => SidNameUse::Computer,
+            other => SidNameUse::Other(other),
+        }
+    }
+}
+
+/// [`lookup_account_sid`]/[`lookup_account_name`]'s resolved-account
+/// result — a `"DOMAIN\name"`-style display split into its two parts,
+/// plus what kind of principal it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountName {
+    pub name: alloc::string::String,
+    pub domain: alloc::string::String,
+    pub sid_name_use: SidNameUse,
+}
+
+/// A `PSID` byte buffer [`lookup_account_name`] fills in — this crate's
+/// only *owned* SID representation (every other `PSID` this module
+/// touches is a borrowed pointer into someone else's memory: a
+/// security-descriptor block, an ACL, …), since `LookupAccountNameW`
+/// has nothing else to point the caller at.
+#[derive(Debug, Clone)]
+pub struct SidBuf {
+    bytes: Vec<u8>,
+}
+
+impl SidBuf {
+    /// A `PSID` pointer into this buffer's own memory, valid for as long
+    /// as this `SidBuf` isn't dropped or moved-and-reallocated (it
+    /// isn't — a `Vec<u8>`'s heap allocation stays put across a move of
+    /// the `Vec` value itself).
+    pub fn as_ptr(&self) -> *const core::ffi::c_void {
+        self.bytes.as_ptr().cast()
+    }
+}
+
+/// Resolve `sid` to an account name — `LookupAccountSidW`. The reverse
+/// direction of [`lookup_account_name`]: turns an owner/ACE `PSID` (e.g.
+/// one [`PathSecurityInfo::owner`]/[`AclEntry::sid`] returned) into a
+/// `"DOMAIN\name"`-style display string, the way `icacls`/`ls -l` show a
+/// human-readable owner instead of a raw SID.
+///
+/// # Safety
+///
+/// `sid` must be a valid `PSID` for the duration of this call.
+pub unsafe fn lookup_account_sid(
+    sid: *mut core::ffi::c_void,
+) -> Result<AccountName, crate::error::Win32Error> {
+    let mut name_len: u32 = 0;
+    let mut domain_len: u32 = 0;
+    let mut sid_name_use: i32 = 0;
+    // SAFETY: `sid` is caller-supplied per this function's own safety
+    // contract; a null `system_name` means "look up on the local
+    // system"; null `name`/`referenced_domain_name` with zeroed lengths
+    // is documented to report the required sizes without needing real
+    // buffers yet.
+    let ok = unsafe {
+        LookupAccountSidW(
+            core::ptr::null(),
+            sid,
+            core::ptr::null_mut(),
+            &mut name_len,
+            core::ptr::null_mut(),
+            &mut domain_len,
+            &mut sid_name_use,
+        )
+    };
+    if ok == 0 {
+        let err = crate::error::Win32Error::last();
+        if err != crate::error::Win32Error::ERROR_INSUFFICIENT_BUFFER {
+            return Err(err);
+        }
+    }
+
+    let mut name_buf: Vec<u16> = alloc::vec![0u16; name_len as usize];
+    let mut domain_buf: Vec<u16> = alloc::vec![0u16; domain_len as usize];
+    // SAFETY: `sid` as above; `name_buf`/`domain_buf` are valid buffers
+    // matched by `name_len`/`domain_len` naming their exact lengths
+    // (from the query above).
+    let ok = unsafe {
+        LookupAccountSidW(
+            core::ptr::null(),
+            sid,
+            name_buf.as_mut_ptr(),
+            &mut name_len,
+            domain_buf.as_mut_ptr(),
+            &mut domain_len,
+            &mut sid_name_use,
+        )
+    };
+    if ok == 0 {
+        return Err(crate::error::Win32Error::last());
+    }
+    Ok(AccountName {
+        name: alloc::string::String::from_utf16_lossy(&name_buf[..name_len as usize]),
+        domain: alloc::string::String::from_utf16_lossy(&domain_buf[..domain_len as usize]),
+        sid_name_use: SidNameUse::from_raw(sid_name_use),
+    })
+}
+
+/// Resolve `name` (e.g. `"DOMAIN\user"` or a bare local account/group
+/// name) to a `PSID` — `LookupAccountNameW`. The reverse direction of
+/// [`lookup_account_sid`]: turns a human-typed account name into the SID
+/// [`build_trustee_with_sid`]/[`build_acl`] need, the way `chown` accepts
+/// a username rather than requiring a raw SID.
+pub fn lookup_account_name(name: &str) -> Result<(SidBuf, AccountName), crate::error::Win32Error> {
+    let wide_name: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+    let mut sid_len: u32 = 0;
+    let mut domain_len: u32 = 0;
+    let mut sid_name_use: i32 = 0;
+    // SAFETY: `wide_name` is a valid, NUL-terminated UTF-16 string live
+    // for the whole call; a null `system_name` means "look up on the
+    // local system"; null `sid`/`referenced_domain_name` with zeroed
+    // lengths is documented to report the required sizes without needing
+    // real buffers yet.
+    let ok = unsafe {
+        LookupAccountNameW(
+            core::ptr::null(),
+            wide_name.as_ptr(),
+            core::ptr::null_mut(),
+            &mut sid_len,
+            core::ptr::null_mut(),
+            &mut domain_len,
+            &mut sid_name_use,
+        )
+    };
+    if ok == 0 {
+        let err = crate::error::Win32Error::last();
+        if err != crate::error::Win32Error::ERROR_INSUFFICIENT_BUFFER {
+            return Err(err);
+        }
+    }
+
+    let mut sid_bytes: Vec<u8> = alloc::vec![0u8; sid_len as usize];
+    let mut domain_buf: Vec<u16> = alloc::vec![0u16; domain_len as usize];
+    // SAFETY: `wide_name` as above; `sid_bytes`/`domain_buf` are valid
+    // buffers matched by `sid_len`/`domain_len` naming their exact
+    // lengths (from the query above).
+    let ok = unsafe {
+        LookupAccountNameW(
+            core::ptr::null(),
+            wide_name.as_ptr(),
+            sid_bytes.as_mut_ptr(),
+            &mut sid_len,
+            domain_buf.as_mut_ptr(),
+            &mut domain_len,
+            &mut sid_name_use,
+        )
+    };
+    if ok == 0 {
+        return Err(crate::error::Win32Error::last());
+    }
+    let account = AccountName {
+        name: name.into(),
+        domain: alloc::string::String::from_utf16_lossy(&domain_buf[..domain_len as usize]),
+        sid_name_use: SidNameUse::from_raw(sid_name_use),
+    };
+    Ok((SidBuf { bytes: sid_bytes }, account))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -795,6 +1006,47 @@ mod tests {
         assert_eq!(
             trustee.name, expected_ptr,
             "the trustee's name pointer should be the wide buffer itself, not a copy"
+        );
+    }
+
+    #[test]
+    fn lookup_account_sid_resolves_a_real_files_owner() {
+        let path = std::env::temp_dir().join("rusty_win32_security_test_lookup_sid.txt");
+        std::fs::write(&path, b"hello").expect("creating the test file should succeed");
+        let path_str = path.to_str().expect("temp path should be valid UTF-8");
+
+        let info = path_security_info(path_str, OWNER_SECURITY_INFORMATION)
+            .expect("GetNamedSecurityInfoW should succeed for a real file");
+        let owner = info.owner().expect("a real file should have an owner SID");
+
+        // SAFETY: `owner` is a valid `PSID` from `info`, which stays
+        // alive (not yet dropped) for this whole call.
+        let account =
+            unsafe { lookup_account_sid(owner) }.expect("LookupAccountSidW should succeed");
+        assert!(
+            !account.name.is_empty(),
+            "a real file's owner should resolve to a non-empty account name"
+        );
+
+        std::fs::remove_file(&path).expect("removing the test file should succeed");
+    }
+
+    #[test]
+    fn lookup_account_name_then_lookup_account_sid_round_trips() {
+        let (sid, account) = lookup_account_name("Everyone")
+            .expect("LookupAccountNameW should succeed for the well-known Everyone group");
+        assert_eq!(account.name, "Everyone");
+
+        // SAFETY: `sid` is still alive (not dropped) for this whole
+        // call; `LookupAccountSidW` never writes through its `Sid`
+        // parameter despite the real Win32 signature not being
+        // `const`-qualified.
+        let resolved = unsafe { lookup_account_sid(sid.as_ptr().cast_mut()) }.expect(
+            "LookupAccountSidW should succeed resolving the SID lookup_account_name just returned",
+        );
+        assert!(
+            !resolved.name.is_empty(),
+            "the round-tripped SID should resolve back to a non-empty account name"
         );
     }
 }

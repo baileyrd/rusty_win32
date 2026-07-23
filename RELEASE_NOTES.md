@@ -6,6 +6,21 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #229 — security: add lookup_account_sid/lookup_account_name
+**2026-07-23** · [#229](https://github.com/baileyrd/rusty_win32/pull/229)
+
+- **Added:** `security::lookup_account_sid`/`security::lookup_account_name`
+  (`LookupAccountSidW`/`LookupAccountNameW`) plus new `AccountName`/
+  `SidNameUse`/`SidBuf` types, closing issue #158 — SID↔name resolution.
+  `lookup_account_sid` turns an owner/ACE `PSID` into a `"DOMAIN\name"`-
+  style display, the way `icacls`/`ls -l` show a human-readable owner
+  instead of a raw SID; `lookup_account_name` is the reverse, turning a
+  typed account name into the `PSID` `build_trustee_with_sid`/`build_acl`
+  need, the way `chown` accepts a username. `SidBuf` is this module's
+  only *owned* SID representation — every other `PSID` it touches is a
+  borrowed pointer into someone else's memory. Both functions use the
+  query-size-then-allocate idiom this crate already uses elsewhere.
+
 ## PR #228 — security: add build_trustee_with_sid/build_trustee_with_name
 **2026-07-23** · [#228](https://github.com/baileyrd/rusty_win32/pull/228)
 
