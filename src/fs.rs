@@ -234,6 +234,7 @@ unsafe extern "system" {
         fail_if_exists: i32,
     ) -> i32;
     fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
+    fn DeleteFileW(file_name: *const u16) -> i32;
 }
 
 /// `MoveFileExW`'s `dwFlags` bit: overwrite `to` if it already exists
@@ -428,6 +429,21 @@ pub fn move_file(from: &str, to: &str, flags: u32) -> Result<(), Win32Error> {
     // SAFETY: `from_wide`/`to_wide` are valid, NUL-terminated UTF-16 strings;
     // `flags` is a plain bitmask, not a pointer.
     let ok = unsafe { MoveFileExW(from_wide.as_ptr(), to_wide.as_ptr(), flags) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
+/// Delete the file at `path` — `DeleteFileW`, the primitive behind an `rm`
+/// builtin. Only removes files, not directories, matching `DeleteFileW`'s
+/// own scope (`RemoveDirectoryW`, out of this crate's current scope, is the
+/// directory-removal counterpart).
+pub fn delete_file(path: &str) -> Result<(), Win32Error> {
+    let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string.
+    let ok = unsafe { DeleteFileW(wide.as_ptr()) };
     if ok == 0 {
         Err(Win32Error::last())
     } else {
@@ -971,5 +987,25 @@ mod tests {
         assert_eq!(moved, b"hello");
 
         std::fs::remove_dir_all(&dir).expect("cleaning up the test directory should succeed");
+    }
+
+    #[test]
+    fn delete_file_removes_an_existing_file() {
+        let dir = std::env::temp_dir().join("rusty_win32_delete_file_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).expect("creating the test directory should succeed");
+        let path = dir.join("to_delete.txt");
+        std::fs::write(&path, b"delete me").expect("writing the file should succeed");
+
+        delete_file(path.to_str().unwrap()).expect("DeleteFileW should succeed");
+        assert!(!path.exists(), "the file should no longer exist");
+
+        std::fs::remove_dir_all(&dir).expect("cleaning up the test directory should succeed");
+    }
+
+    #[test]
+    fn delete_file_fails_for_a_nonexistent_file() {
+        let err = delete_file(r"C:\this-file-should-not-exist-rusty-win32-test.txt").unwrap_err();
+        assert_eq!(err, Win32Error::ERROR_FILE_NOT_FOUND);
     }
 }

@@ -6,6 +6,14 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #110 — fs: add delete_file (DeleteFileW)
+**2026-07-23** · [#110](https://github.com/baileyrd/rusty_win32/pull/110)
+
+- **Added:** `fs::delete_file` (`DeleteFileW`), closing issue #77 from the
+  parity-loop sweep — the primitive behind an `rm` builtin. Only removes
+  files, not directories, matching `DeleteFileW`'s own scope. Filed for
+  tracking, not urgency: `rush` has no `rm` builtin today.
+
 ## PR #109 — fs: add move_file (MoveFileExW)
 **2026-07-23** · [#109](https://github.com/baileyrd/rusty_win32/pull/109)
 
