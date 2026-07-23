@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #197 — handle: add signal_and_wait (SignalObjectAndWait)
+**2026-07-23** · [#197](https://github.com/baileyrd/rusty_win32/pull/197)
+
+- **Added:** `handle::signal_and_wait` (`SignalObjectAndWait`), closing
+  issue #126 — atomically signals one synchronization object (mutex,
+  semaphore, or event) and waits on another, avoiding the race a caller
+  would otherwise accept making two separate calls. Reuses the `WaitResult`
+  type `wait_single_ex`/`wait_multiple_ex` (issue #124) introduced. Another
+  round-2 "weak/no clear consumer" item (`gap-analysis.md`); no current
+  `rush` feature asks for this.
+
 ## PR #196 — process: add sleep_ms_ex (SleepEx)
 **2026-07-23** · [#196](https://github.com/baileyrd/rusty_win32/pull/196)
 

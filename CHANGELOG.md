@@ -141,6 +141,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   crate — another round-2 item.
 - `process::sleep_ms_ex` (`SleepEx`), the alertable-sleep variant of
   `process::sleep_ms` — another round-2 item.
+- `handle::signal_and_wait` (`SignalObjectAndWait`), atomically signaling
+  one synchronization object and waiting on another — another round-2
+  item.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
