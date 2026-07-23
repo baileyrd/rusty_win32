@@ -37,6 +37,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `SetCurrentDirectoryW`) — the actual Win32 primitives behind `cd`/`pwd`,
   found by a parity-loop pass against the real Win32 API surface
   (`gap-analysis.md`) rather than the round-2 needs-driven assessment above.
+- `fs::read_dir` (`FindFirstFileW`/`FindNextFileW`/`FindClose`), a `ReadDir`
+  iterator of `DirEntry` for listing a directory's contents — another
+  parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
