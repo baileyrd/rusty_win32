@@ -132,6 +132,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   process exit code — another round-2 item.
 - `process::thread_times` (`GetThreadTimes`), the thread-level counterpart
   to `process::times` — another round-2 item.
+- `handle::create_semaphore`/`handle::release_semaphore`
+  (`CreateSemaphoreW`/`ReleaseSemaphore`), a counting semaphore alongside
+  the already-wrapped mutex — another round-2 item.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

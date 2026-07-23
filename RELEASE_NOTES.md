@@ -6,6 +6,18 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #194 — handle: add create_semaphore/release_semaphore (CreateSemaphoreW/ReleaseSemaphore)
+**2026-07-23** · [#194](https://github.com/baileyrd/rusty_win32/pull/194)
+
+- **Added:** `handle::create_semaphore`/`handle::release_semaphore`
+  (`CreateSemaphoreW`/`ReleaseSemaphore`), closing issue #123 — a counting
+  semaphore, alongside the already-wrapped mutex (`handle::create_mutex`)
+  the other standard Win32 synchronization primitive. Acquiring reuses
+  this crate's existing `WaitForSingleObject`-shaped wait primitives
+  (`console::wait_readable`), the same pattern `create_mutex` already
+  established. Another round-2 "weak/no clear consumer" item
+  (`gap-analysis.md`); no current `rush` feature asks for this.
+
 ## PR #193 — process: add thread_times (GetThreadTimes)
 **2026-07-23** · [#193](https://github.com/baileyrd/rusty_win32/pull/193)
 
