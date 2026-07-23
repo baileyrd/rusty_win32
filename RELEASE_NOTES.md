@@ -6,6 +6,16 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #218 — registry: add delete_value
+**2026-07-23** · [#218](https://github.com/baileyrd/rusty_win32/pull/218)
+
+- **Added:** `registry::delete_value` (`RegDeleteValueW`), closing issue
+  #147 — remove one named value under an open key, without touching the
+  key itself or its other values/subkeys. The earlier `set_value` round
+  trip test now also cleans up the values it wrote, now that
+  `delete_value` exists to do it (the key itself still can't be removed —
+  no `delete_key` yet).
+
 ## PR #217 — registry: add set_value
 **2026-07-23** · [#217](https://github.com/baileyrd/rusty_win32/pull/217)
 
