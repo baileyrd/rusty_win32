@@ -102,6 +102,7 @@ unsafe extern "system" {
     fn TerminateProcess(process: RawHandle, exit_code: u32) -> i32;
     fn GetProcessId(process: RawHandle) -> u32;
     fn Sleep(milliseconds: u32);
+    fn SleepEx(milliseconds: u32, alertable: i32) -> u32;
     fn GetSystemInfo(system_info: *mut SystemInfo);
     fn GetComputerNameW(buffer: *mut u16, size: *mut u32) -> i32;
     fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
@@ -1107,6 +1108,19 @@ pub fn sleep_ms(milliseconds: u32) {
     unsafe { Sleep(milliseconds) }
 }
 
+/// Alertable-sleep variant of [`sleep_ms`] — `SleepEx`. With `alertable:
+/// true`, an APC queued to this thread wakes the sleep early, reported as
+/// `WAIT_IO_COMPLETION` (`192`) rather than `0` (the full duration
+/// elapsed); with `alertable: false` this behaves identically to
+/// `sleep_ms`. No `Result`: like `Sleep`, `SleepEx` has no documented
+/// failure mode to report. No current `rush` feature uses APCs, so
+/// `alertable: true` has no realistic use yet — filed for Win32 parity.
+pub fn sleep_ms_ex(milliseconds: u32, alertable: bool) -> u32 {
+    // SAFETY: `SleepEx` has no precondition beyond a plain millisecond
+    // count and a plain boolean flag.
+    unsafe { SleepEx(milliseconds, i32::from(alertable)) }
+}
+
 /// The number of logical processors visible to the calling process —
 /// `GetSystemInfo`'s `dwNumberOfProcessors`, the primitive behind an
 /// `nproc`-equivalent builtin. No `Result`: `GetSystemInfo` has no
@@ -1815,6 +1829,21 @@ mod tests {
         assert!(
             start.elapsed().as_millis() >= 50,
             "Sleep should block for at least the requested duration"
+        );
+    }
+
+    #[test]
+    fn sleep_ms_ex_blocks_and_reports_zero_when_not_woken_by_an_apc() {
+        const WAIT_IO_COMPLETION: u32 = 192;
+        let start = std::time::Instant::now();
+        let result = sleep_ms_ex(50, false);
+        assert!(
+            start.elapsed().as_millis() >= 50,
+            "SleepEx should block for at least the requested duration"
+        );
+        assert_ne!(
+            result, WAIT_IO_COMPLETION,
+            "no APC was queued, so this should report 0, not WAIT_IO_COMPLETION"
         );
     }
 
