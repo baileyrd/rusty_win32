@@ -6,6 +6,15 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #102 — volume: add disk_free_space (GetDiskFreeSpaceExW)
+**2026-07-23** · [#102](https://github.com/baileyrd/rusty_win32/pull/102)
+
+- **Added:** `volume::disk_free_space` (`GetDiskFreeSpaceExW`), returning a
+  `DiskFreeSpace` (`free_bytes_available_to_caller`/`total_bytes`/
+  `total_free_bytes`) — closing issue #69 from the parity-loop sweep.
+  `volume.rs` already wrapped volume metadata (`GetVolumeInformationW`,
+  issue #41) but not free/total space, needed for a `df`-style builtin.
+
 ## PR #101 — handle: add handle_information (GetHandleInformation)
 **2026-07-23** · [#101](https://github.com/baileyrd/rusty_win32/pull/101)
 
