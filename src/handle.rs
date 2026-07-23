@@ -59,6 +59,12 @@ unsafe extern "system" {
     ) -> i32;
     fn GetStdHandle(std_handle: u32) -> RawHandle;
     fn SetStdHandle(std_handle: u32, handle: RawHandle) -> i32;
+    fn CreateMutexW(
+        mutex_attributes: *const core::ffi::c_void,
+        initial_owner: i32,
+        name: *const u16,
+    ) -> RawHandle;
+    fn ReleaseMutex(mutex: RawHandle) -> i32;
 }
 
 /// `GetStdHandle`/`SetStdHandle`'s `nStdHandle` slot selector for the
@@ -289,6 +295,56 @@ pub unsafe fn set_std_handle(slot: u32, handle: RawHandle) -> Result<(), Win32Er
     }
 }
 
+/// Create (or open, if `name` already names an existing one) a named or
+/// unnamed mutex — `CreateMutexW`, the Windows analog of `flock`'s
+/// cross-process locking, but as a standalone kernel object rather than a
+/// file-descriptor operation. `name`, if given, makes the mutex visible to
+/// any process that names the same string (e.g. guarding concurrent writes
+/// to a shared history file from multiple shell instances); `None` creates
+/// an unnamed mutex only this process (and anything it hands the returned
+/// handle to) can reach. `initial_owner` requests immediate ownership,
+/// skipping a separate wait — the same shortcut `CreateMutexW`'s own
+/// `bInitialOwner` parameter offers. Acquiring an *existing* mutex is
+/// already covered by this crate's `WaitForSingleObject`-shaped wait
+/// primitives (e.g. [`crate::process::wait`]'s underlying call, or
+/// [`crate::console::wait_readable`]) once a handle is in hand — this
+/// function only creates/opens the object itself.
+pub fn create_mutex(name: Option<&str>, initial_owner: bool) -> Result<RawHandle, Win32Error> {
+    extern crate alloc;
+    let wide: Option<alloc::vec::Vec<u16>> =
+        name.map(|n| n.encode_utf16().chain(core::iter::once(0)).collect());
+    let name_ptr = wide.as_ref().map_or(core::ptr::null(), |w| w.as_ptr());
+    // SAFETY: `mutex_attributes = NULL` requests default (non-inheritable)
+    // security attributes, a documented valid input; `name_ptr` is either
+    // NULL (documented as "create an unnamed mutex") or a valid,
+    // NUL-terminated UTF-16 string kept alive for the duration of this call.
+    let handle = unsafe { CreateMutexW(core::ptr::null(), i32::from(initial_owner), name_ptr) };
+    if handle.is_null() {
+        Err(Win32Error::last())
+    } else {
+        Ok(handle)
+    }
+}
+
+/// Release ownership of `mutex`, previously acquired via a
+/// `WaitForSingleObject`-shaped wait (or [`create_mutex`]'s own
+/// `initial_owner: true`) — `ReleaseMutex`.
+///
+/// # Safety
+///
+/// `mutex` must be a currently-open, valid mutex handle currently owned by
+/// the calling thread.
+pub unsafe fn release_mutex(mutex: RawHandle) -> Result<(), Win32Error> {
+    // SAFETY: `mutex` is caller-supplied per this function's own safety
+    // contract.
+    let ok = unsafe { ReleaseMutex(mutex) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,5 +535,41 @@ mod tests {
             let _ = close(read_end);
             let _ = close(write_end);
         }
+    }
+
+    #[test]
+    fn create_mutex_then_release_mutex_round_trips() {
+        let mutex = create_mutex(None, false).expect("CreateMutexW should succeed");
+
+        // SAFETY: `mutex` is a freshly created, valid, waitable handle.
+        let acquired = unsafe { crate::console::wait_readable(mutex, 0) }
+            .expect("WaitForSingleObject should succeed acquiring an unowned mutex");
+        assert!(
+            acquired,
+            "an unowned mutex should be immediately acquirable"
+        );
+
+        // SAFETY: `mutex` is a valid mutex handle currently owned by this
+        // thread (just acquired above); this is the operation under test.
+        unsafe { release_mutex(mutex) }.expect("ReleaseMutex should succeed");
+
+        // SAFETY: `mutex` is still a valid, currently-open handle, closed
+        // exactly once and not used again after this.
+        unsafe { close(mutex).unwrap() };
+    }
+
+    #[test]
+    fn create_mutex_with_initial_owner_starts_already_owned() {
+        let mutex = create_mutex(Some("rusty_win32_test_mutex_initial_owner"), true)
+            .expect("CreateMutexW should succeed");
+
+        // SAFETY: `mutex` is valid and currently owned by this thread
+        // (`initial_owner: true` above).
+        unsafe { release_mutex(mutex) }
+            .expect("ReleaseMutex should succeed releasing initial ownership");
+
+        // SAFETY: `mutex` is still a valid, currently-open handle, closed
+        // exactly once and not used again after this.
+        unsafe { close(mutex).unwrap() };
     }
 }

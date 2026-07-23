@@ -116,6 +116,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   process-wide `SIGSTOP` — another parity-loop find.
 - `pipe::set_pipe_mode` (`SetNamedPipeHandleState`), non-blocking mode and
   byte/message-mode switching for named pipes — another parity-loop find.
+- `handle::create_mutex`/`handle::release_mutex`
+  (`CreateMutexW`/`ReleaseMutex`), the Windows analog of `flock`'s
+  cross-process locking — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
