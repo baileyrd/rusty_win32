@@ -6,6 +6,19 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #94 — job: add is_in_job (IsProcessInJob)
+**2026-07-23** · [#94](https://github.com/baileyrd/rusty_win32/pull/94)
+
+- **Added:** `job::is_in_job` (`IsProcessInJob`), closing issue #61 from the
+  parity-loop sweep. Checks whether a process already belongs to a given
+  job — or, with `job: None`, to *any* job — before calling `assign`.
+  Windows automatically nests every child a job member spawns into that
+  same job, and some environments (GitHub Actions' Windows runners among
+  them, per rush's own `docs/WINDOWS_JOB_CONTROL.md`) start a process
+  already job-scoped by an ambient job wrapping the whole step's process
+  tree, which would otherwise surface as a surprise `AssignProcessToJobObject`
+  failure.
+
 ## PR #93 — process: add image_path (QueryFullProcessImageNameW)
 **2026-07-23** · [#93](https://github.com/baileyrd/rusty_win32/pull/93)
 

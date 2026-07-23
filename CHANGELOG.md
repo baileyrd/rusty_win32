@@ -55,6 +55,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `process::image_path` (`QueryFullProcessImageNameW`), the full executable
   path for a process handle, completing `list_processes`'s bare-filename-only
   `exe_file` — another parity-loop find.
+- `job::is_in_job` (`IsProcessInJob`), checking job membership before
+  `assign` to avoid a surprise failure under an ambient job (e.g. GitHub
+  Actions' Windows runners) — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
