@@ -55,6 +55,8 @@ unsafe extern "system" {
         old_acl: *const Acl,
         new_acl: *mut *mut Acl,
     ) -> u32;
+    fn BuildTrusteeWithSidW(trustee: *mut Trustee, sid: *mut core::ffi::c_void);
+    fn BuildTrusteeWithNameW(trustee: *mut Trustee, name: *mut u16);
 }
 
 #[link(name = "kernel32")]
@@ -411,12 +413,6 @@ pub unsafe fn acl_entries(
     Ok(entries)
 }
 
-/// `MULTIPLE_TRUSTEE_OPERATION`'s only value this module supports — the
-/// "multiple trustee" chaining feature (`TRUSTEE_W::pMultipleTrustee`)
-/// is an obscure, rarely-used mechanism out of this module's scope;
-/// every [`Trustee`] this crate builds names exactly one principal.
-const NO_MULTIPLE_TRUSTEE: i32 = 0;
-
 /// `TRUSTEE_FORM` — whether a [`Trustee`]'s name field holds a `PSID` or
 /// a wide string name. Only these two ordinary forms are supported
 /// (`TRUSTEE_BAD_FORM` and the object-specific `_AND_SID`/`_AND_NAME`
@@ -450,40 +446,74 @@ pub enum TrusteeType {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Trustee {
+    // "Multiple trustee" chaining is an obscure, rarely-used mechanism
+    // this crate doesn't support — `BuildTrusteeWithSidW`/
+    // `BuildTrusteeWithNameW` always set these two fields to "none"
+    // themselves, so they stay private rather than exposing a knob with
+    // only one ever-correct value.
     multiple_trustee: *mut Trustee,
     multiple_trustee_operation: i32,
-    trustee_form: TrusteeForm,
-    trustee_type: TrusteeType,
+    pub trustee_form: TrusteeForm,
+    pub trustee_type: TrusteeType,
     /// The real `TRUSTEE_W::ptstrName` field — either a `PSID` (when
     /// `trustee_form` is [`TrusteeForm::Sid`]) or a NUL-terminated wide
     /// string (when [`TrusteeForm::Name`]), reinterpreted either way
     /// through this same `LPWCH`-typed slot, matching the real
     /// `TRUSTEE_W`'s own union-by-convention use of this field.
-    name: *mut u16,
+    pub name: *mut u16,
 }
 
-impl Trustee {
-    /// Build a `Trustee` naming a `PSID` — `TrusteeForm::Sid`. The
-    /// primitives that would normally build one from a name or a
-    /// well-known identity (`BuildTrusteeWithSidW`/`CreateWellKnownSid`)
-    /// are later round-2 items this crate doesn't have yet; a caller
-    /// today supplies an already-obtained `PSID`, e.g. one
-    /// [`PathSecurityInfo::owner`] returned.
-    ///
-    /// # Safety
-    ///
-    /// `sid` must be a valid `PSID` for as long as this `Trustee` (and
-    /// anything it's passed to, e.g. an [`ExplicitAccess`] entry given to
-    /// [`build_acl`]) is in use.
-    pub unsafe fn from_sid(sid: *mut core::ffi::c_void, trustee_type: TrusteeType) -> Self {
-        Trustee {
-            multiple_trustee: core::ptr::null_mut(),
-            multiple_trustee_operation: NO_MULTIPLE_TRUSTEE,
-            trustee_form: TrusteeForm::Sid,
-            trustee_type,
-            name: sid.cast(),
-        }
-    }
+/// Build a `Trustee` naming a `PSID` — `BuildTrusteeWithSidW`. The
+/// resulting `Trustee`'s own `name` pointer is `sid` itself (matching
+/// `TRUSTEE_W`'s `ptstrName` field's `TrusteeForm::Sid`-reinterpreted-
+/// as-`PSID` convention) — nothing is copied.
+///
+/// `TrusteeType::Unknown` matches `BuildTrusteeWithSidW`'s own behavior:
+/// it always sets `TrusteeType` to `TRUSTEE_IS_UNKNOWN`, never inspecting
+/// `sid` to guess whether it names a user/group/well-known-group. A
+/// caller wanting a specific [`TrusteeType`] recorded sets `.trustee_type`
+/// on the result afterward (not exposed as a parameter here, matching
+/// `BuildTrusteeWithSidW`'s own real signature).
+///
+/// # Safety
+///
+/// `sid` must be a valid `PSID` for as long as the returned `Trustee`
+/// (and anything it's passed to, e.g. an [`ExplicitAccess`] entry given
+/// to [`build_acl`]) is in use.
+pub unsafe fn build_trustee_with_sid(sid: *mut core::ffi::c_void) -> Trustee {
+    let mut trustee = core::mem::MaybeUninit::<Trustee>::uninit();
+    // SAFETY: `sid` is caller-supplied per this function's own safety
+    // contract; `trustee` is a valid, correctly-sized out-pointer.
+    unsafe { BuildTrusteeWithSidW(trustee.as_mut_ptr(), sid) };
+    // SAFETY: `BuildTrusteeWithSidW` is documented to always fully
+    // initialize every field of the `TRUSTEE_W` it's given.
+    unsafe { trustee.assume_init() }
+}
+
+/// Build a `Trustee` naming a wide-string principal (e.g. `"DOMAIN\name"`,
+/// or a `S-1-5-...` SID string) — `BuildTrusteeWithNameW`. Unlike
+/// [`build_trustee_with_sid`], this doesn't copy `name`'s bytes either —
+/// the returned `Trustee`'s own `name` pointer is `name.as_mut_ptr()`
+/// itself. Takes an already-built, NUL-terminated wide buffer (not `&str`,
+/// diverging from this issue's literal signature) for exactly that
+/// reason: an internally-built temporary `Vec<u16>` would be freed the
+/// moment this function returned, leaving the result's `name` pointer
+/// dangling — the caller must own a buffer that actually outlives the
+/// `Trustee`.
+///
+/// # Safety
+///
+/// `name` must be a valid, NUL-terminated UTF-16 string, kept alive (not
+/// dropped or reallocated) for as long as the returned `Trustee` (and
+/// anything it's passed to) is in use.
+pub unsafe fn build_trustee_with_name(name: &mut [u16]) -> Trustee {
+    let mut trustee = core::mem::MaybeUninit::<Trustee>::uninit();
+    // SAFETY: `name` is caller-supplied per this function's own safety
+    // contract; `trustee` is a valid, correctly-sized out-pointer.
+    unsafe { BuildTrusteeWithNameW(trustee.as_mut_ptr(), name.as_mut_ptr()) };
+    // SAFETY: `BuildTrusteeWithNameW` is documented to always fully
+    // initialize every field of the `TRUSTEE_W` it's given.
+    unsafe { trustee.assume_init() }
 }
 
 /// `ACCESS_MODE` — what an [`ExplicitAccess`] entry does to the ACL being
@@ -693,13 +723,15 @@ mod tests {
         let owner = info.owner().expect("a real file should have an owner SID");
 
         const GENERIC_READ: u32 = 0x8000_0000;
+        // SAFETY: `owner` is a valid `PSID` from `info`, which stays
+        // alive (not yet dropped) for this whole test.
+        let mut trustee = unsafe { build_trustee_with_sid(owner) };
+        trustee.trustee_type = TrusteeType::User;
         let entry = ExplicitAccess {
             access_permissions: GENERIC_READ,
             access_mode: AccessMode::Grant,
             inheritance: 0,
-            // SAFETY: `owner` is a valid `PSID` from `info`, which stays
-            // alive (not yet dropped) for this whole test.
-            trustee: unsafe { Trustee::from_sid(owner, TrusteeType::User) },
+            trustee,
         };
 
         // SAFETY: `entries` (just built above) carries a still-valid
@@ -720,5 +752,49 @@ mod tests {
         assert_eq!(acl_entries_found[0].mask, GENERIC_READ);
 
         std::fs::remove_file(&path).expect("removing the test file should succeed");
+    }
+
+    #[test]
+    fn build_trustee_with_sid_names_the_given_sid_as_unknown_type() {
+        let path = std::env::temp_dir().join("rusty_win32_security_test_build_trustee_sid.txt");
+        std::fs::write(&path, b"hello").expect("creating the test file should succeed");
+        let path_str = path.to_str().expect("temp path should be valid UTF-8");
+
+        let info = path_security_info(path_str, OWNER_SECURITY_INFORMATION)
+            .expect("GetNamedSecurityInfoW should succeed for a real file");
+        let owner = info.owner().expect("a real file should have an owner SID");
+
+        // SAFETY: `owner` is a valid `PSID` from `info`, which stays
+        // alive (not yet dropped) for this whole test.
+        let trustee = unsafe { build_trustee_with_sid(owner) };
+        assert_eq!(trustee.trustee_form, TrusteeForm::Sid);
+        // `BuildTrusteeWithSidW` always reports `TRUSTEE_IS_UNKNOWN` —
+        // it never inspects the SID to guess a more specific type.
+        assert_eq!(trustee.trustee_type, TrusteeType::Unknown);
+        assert_eq!(
+            trustee.name.cast::<core::ffi::c_void>(),
+            owner,
+            "the trustee's name pointer should be the SID itself, not a copy"
+        );
+
+        std::fs::remove_file(&path).expect("removing the test file should succeed");
+    }
+
+    #[test]
+    fn build_trustee_with_name_names_the_given_wide_string() {
+        let mut wide: alloc::vec::Vec<u16> = "Everyone"
+            .encode_utf16()
+            .chain(core::iter::once(0))
+            .collect();
+        let expected_ptr = wide.as_mut_ptr();
+
+        // SAFETY: `wide` is a valid, NUL-terminated UTF-16 buffer that
+        // stays alive (not dropped/reallocated) for this whole test.
+        let trustee = unsafe { build_trustee_with_name(&mut wide) };
+        assert_eq!(trustee.trustee_form, TrusteeForm::Name);
+        assert_eq!(
+            trustee.name, expected_ptr,
+            "the trustee's name pointer should be the wide buffer itself, not a copy"
+        );
     }
 }
