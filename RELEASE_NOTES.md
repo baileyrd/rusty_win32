@@ -6,6 +6,15 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #103 — process: add sleep_ms (Sleep)
+**2026-07-23** · [#103](https://github.com/baileyrd/rusty_win32/pull/103)
+
+- **Added:** `process::sleep_ms` (`Sleep`), closing issue #70 from the
+  parity-loop sweep — the direct primitive behind a `sleep`/`usleep`
+  builtin. No `Result`: `Sleep` has no documented failure mode, matching
+  this crate's already-established "never fails" pattern (e.g.
+  `GetDriveTypeW`).
+
 ## PR #102 — volume: add disk_free_space (GetDiskFreeSpaceExW)
 **2026-07-23** · [#102](https://github.com/baileyrd/rusty_win32/pull/102)
 

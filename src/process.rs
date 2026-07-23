@@ -101,6 +101,7 @@ unsafe extern "system" {
     fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> RawHandle;
     fn TerminateProcess(process: RawHandle, exit_code: u32) -> i32;
     fn GetProcessId(process: RawHandle) -> u32;
+    fn Sleep(milliseconds: u32);
     fn QueryFullProcessImageNameW(
         process: RawHandle,
         flags: u32,
@@ -870,6 +871,15 @@ pub unsafe fn image_path(process: RawHandle) -> Result<alloc::string::String, Wi
     Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
 }
 
+/// Block the calling thread for `milliseconds` — `Sleep`, the direct
+/// primitive behind a `sleep`/`usleep` builtin. No `Result`: `Sleep` has no
+/// documented failure mode to report, matching this crate's already-
+/// established "never fails" pattern for e.g. `GetDriveTypeW`.
+pub fn sleep_ms(milliseconds: u32) {
+    // SAFETY: `Sleep` has no precondition beyond a plain millisecond count.
+    unsafe { Sleep(milliseconds) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1303,5 +1313,15 @@ mod tests {
             crate::handle::close(spawned.process).unwrap();
             crate::handle::close(spawned.thread).unwrap();
         }
+    }
+
+    #[test]
+    fn sleep_ms_blocks_for_at_least_the_requested_duration() {
+        let start = std::time::Instant::now();
+        sleep_ms(50);
+        assert!(
+            start.elapsed().as_millis() >= 50,
+            "Sleep should block for at least the requested duration"
+        );
     }
 }
