@@ -6,6 +6,19 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #207 — process: add logical_processor_information (GetLogicalProcessorInformation)
+**2026-07-23** · [#207](https://github.com/baileyrd/rusty_win32/pull/207)
+
+- **Added:** `process::logical_processor_information`
+  (`GetLogicalProcessorInformation`) plus `LogicalProcessorInformation`/
+  `ProcessorRelationship`, closing issue #136 — detailed CPU topology
+  (cores/NUMA nodes/cache) beyond `process::logical_processor_count`'s
+  single number, using the query-size-then-allocate pattern this crate
+  already uses elsewhere. Only `processor_mask`/`relationship` are
+  exposed (not cache/NUMA-specific fields) — a future consumer needing
+  those can extend it. Another round-2 "weak/no clear consumer" item
+  (`gap-analysis.md`); no current `rush` feature asks for this.
+
 ## PR #206 — path: add system_directory/windows_directory (GetSystemDirectoryW/GetWindowsDirectoryW)
 **2026-07-23** · [#206](https://github.com/baileyrd/rusty_win32/pull/206)
 
