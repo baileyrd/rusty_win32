@@ -6,6 +6,20 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #222 — registry: add key_info
+**2026-07-23** · [#222](https://github.com/baileyrd/rusty_win32/pull/222)
+
+- **Added:** `registry::key_info` (`RegQueryInfoKeyW`) plus a new
+  `KeyInfo` struct, closing issue #151 — subkey/value counts and maximum
+  name/data lengths in one call, the "ask how big first" pattern
+  `fs::final_path` already uses elsewhere. `enum_values`/`enum_keys`
+  already ran this same query internally to pre-size their own buffers;
+  this exposes it directly for a caller that wants the counts/lengths
+  themselves. Doesn't include the class name (a legacy concept with no
+  real modern use) or the security descriptor length (the `security`
+  module's territory, not this one's). This completes the `registry`
+  module's round-2 item list (issues #142-#151).
+
 ## PR #221 — registry: add enum_keys
 **2026-07-23** · [#221](https://github.com/baileyrd/rusty_win32/pull/221)
 

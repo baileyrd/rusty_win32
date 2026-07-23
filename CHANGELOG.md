@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `registry::key_info` (`RegQueryInfoKeyW`) plus the `KeyInfo` struct —
+  subkey/value counts and max name/data lengths in one call, the same
+  query `enum_values`/`enum_keys` already use internally to pre-size
+  their own buffers, now exposed directly.
 - `registry::enum_keys` (`RegEnumKeyExW`, sized via `RegQueryInfoKeyW`)
   plus the `RegKeyIter` iterator type — enumerate a key's immediate
   subkey names as `(String, Timespec)` pairs, the last-write time decoded

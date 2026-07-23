@@ -78,7 +78,7 @@ unsafe extern "system" {
         max_value_name_len: *mut u32,
         max_value_len: *mut u32,
         security_descriptor_len: *mut u32,
-        last_write_time: *mut core::ffi::c_void,
+        last_write_time: *mut FileTime,
     ) -> i32;
     fn RegEnumValueW(
         key: HKey,
@@ -878,6 +878,83 @@ pub unsafe fn enum_keys(key: HKey) -> RegKeyIter {
     }
 }
 
+/// [`key_info`]'s result — `RegQueryInfoKeyW`'s subkey/value counts and
+/// maximum name/data lengths in one call, the "ask how big first"
+/// pattern [`crate::fs::final_path`] already uses elsewhere in this
+/// crate, needed to pre-size buffers before enumerating (which
+/// [`enum_values`]/[`enum_keys`] already do internally — this exposes
+/// the same query directly, for a caller that wants the counts/lengths
+/// themselves rather than just an iterator). Doesn't include the class
+/// name or security descriptor length — the class name is a legacy
+/// concept with no real modern use, and the security descriptor is the
+/// `security` module's territory, not this one's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyInfo {
+    /// How many immediate subkeys `key` has.
+    pub sub_key_count: u32,
+    /// The longest subkey name among them, in UTF-16 code units (not
+    /// counting a terminating NUL).
+    pub max_sub_key_len: u32,
+    /// How many values `key` has.
+    pub value_count: u32,
+    /// The longest value name among them, in UTF-16 code units (not
+    /// counting a terminating NUL).
+    pub max_value_name_len: u32,
+    /// The largest value data size among them, in bytes.
+    pub max_value_len: u32,
+    /// When `key` (or one of its values) was last modified.
+    pub last_write_time: Timespec,
+}
+
+/// Query `key`'s subkey/value counts and maximum name/data lengths in one
+/// call — `RegQueryInfoKeyW`.
+///
+/// # Safety
+///
+/// `key` must be a currently-valid `HKey` — one of the predefined roots
+/// in this module, or a key [`open_key`]/[`create_key`] previously
+/// returned that hasn't been closed yet.
+pub unsafe fn key_info(key: HKey) -> Result<KeyInfo, crate::error::Win32Error> {
+    let mut sub_key_count: u32 = 0;
+    let mut max_sub_key_len: u32 = 0;
+    let mut value_count: u32 = 0;
+    let mut max_value_name_len: u32 = 0;
+    let mut max_value_len: u32 = 0;
+    let mut last_write = FileTime::default();
+    // SAFETY: `key` is caller-supplied per this function's own safety
+    // contract; every out-pointer is either a valid pointer to one of
+    // this function's own locals, or null for the class name/security
+    // descriptor length this crate doesn't want — documented-valid when
+    // that information isn't needed.
+    let status = unsafe {
+        RegQueryInfoKeyW(
+            key,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            &mut sub_key_count,
+            &mut max_sub_key_len,
+            core::ptr::null_mut(),
+            &mut value_count,
+            &mut max_value_name_len,
+            &mut max_value_len,
+            core::ptr::null_mut(),
+            &mut last_write,
+        )
+    };
+    if status != 0 {
+        return Err(crate::error::Win32Error::from_raw(status as u32));
+    }
+    Ok(KeyInfo {
+        sub_key_count,
+        max_sub_key_len,
+        value_count,
+        max_value_name_len,
+        max_value_len,
+        last_write_time: filetime_to_timespec(last_write),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1368,6 +1445,80 @@ mod tests {
             .collect::<Result<alloc::vec::Vec<_>, _>>()
             .expect("RegEnumKeyExW should succeed (by finding nothing) for a key with no subkeys");
         assert!(found.is_empty());
+
+        // SAFETY: `key` is still the same valid, currently-open handle.
+        unsafe { close_key(key) }.expect("RegCloseKey should succeed");
+        // SAFETY: `HKEY_CURRENT_USER` is the same predefined root.
+        unsafe { delete_key(HKEY_CURRENT_USER, subkey.as_str(), 0) }
+            .expect("RegDeleteKeyExW should succeed");
+    }
+
+    #[test]
+    fn key_info_reports_plausible_counts_and_lengths() {
+        let subkey = format!(
+            "Software\\rusty_win32_registry_test_key_info_{}",
+            std::process::id()
+        );
+        // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid root.
+        let (key, _disposition) =
+            unsafe { create_key(HKEY_CURRENT_USER, subkey.as_str(), KEY_ALL_ACCESS) }
+                .expect("RegCreateKeyExW should succeed");
+
+        // SAFETY: `key` was just created above, opened with
+        // `KEY_ALL_ACCESS`, and stays open for this whole test.
+        unsafe { set_value(key, "a_value_name", &RegistryValue::Dword(1)) }
+            .expect("RegSetValueExW should succeed");
+        // SAFETY: same as above.
+        let (child, _disposition) = unsafe { create_key(key, "a_child", KEY_ALL_ACCESS) }
+            .expect("RegCreateKeyExW should succeed");
+        // SAFETY: `child` was just created above and not yet closed.
+        unsafe { close_key(child) }.expect("RegCloseKey should succeed");
+
+        // SAFETY: `key` is still the same valid, currently-open handle.
+        let info = unsafe { key_info(key) }.expect("RegQueryInfoKeyW should succeed");
+        assert_eq!(info.sub_key_count, 1);
+        assert_eq!(info.value_count, 1);
+        assert!(
+            info.max_sub_key_len >= "a_child".len() as u32,
+            "max_sub_key_len should be at least as long as the one subkey's own name"
+        );
+        assert!(
+            info.max_value_name_len >= "a_value_name".len() as u32,
+            "max_value_name_len should be at least as long as the one value's own name"
+        );
+        assert!(
+            info.last_write_time.secs > 0,
+            "a key modified moments ago should report a plausible post-1970 last-write time"
+        );
+
+        // SAFETY: `key` is still the same valid, currently-open handle.
+        unsafe { delete_value(key, "a_value_name") }.expect("RegDeleteValueW should succeed");
+        // SAFETY: same as above.
+        unsafe { delete_key(key, "a_child", 0) }.expect("RegDeleteKeyExW should succeed");
+        // SAFETY: same as above.
+        unsafe { close_key(key) }.expect("RegCloseKey should succeed");
+        // SAFETY: `HKEY_CURRENT_USER` is the same predefined root; the
+        // subkey is now empty of both its value and its child.
+        unsafe { delete_key(HKEY_CURRENT_USER, subkey.as_str(), 0) }
+            .expect("RegDeleteKeyExW should succeed");
+    }
+
+    #[test]
+    fn key_info_reports_zero_counts_for_a_fresh_empty_key() {
+        let subkey = format!(
+            "Software\\rusty_win32_registry_test_key_info_empty_{}",
+            std::process::id()
+        );
+        // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid root.
+        let (key, _disposition) =
+            unsafe { create_key(HKEY_CURRENT_USER, subkey.as_str(), KEY_ALL_ACCESS) }
+                .expect("RegCreateKeyExW should succeed");
+
+        // SAFETY: `key` was just created above and stays open for this
+        // whole call.
+        let info = unsafe { key_info(key) }.expect("RegQueryInfoKeyW should succeed");
+        assert_eq!(info.sub_key_count, 0);
+        assert_eq!(info.value_count, 0);
 
         // SAFETY: `key` is still the same valid, currently-open handle.
         unsafe { close_key(key) }.expect("RegCloseKey should succeed");
