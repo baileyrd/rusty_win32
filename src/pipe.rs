@@ -80,6 +80,7 @@ unsafe extern "system" {
         security_attributes: *const core::ffi::c_void,
     ) -> RawHandle;
     fn ConnectNamedPipe(named_pipe: RawHandle, overlapped: *mut core::ffi::c_void) -> i32;
+    fn DisconnectNamedPipe(named_pipe: RawHandle) -> i32;
     fn WaitNamedPipeW(name: *const u16, timeout_ms: u32) -> i32;
     fn CreateFileW(
         file_name: *const u16,
@@ -176,6 +177,28 @@ pub unsafe fn connect_server(pipe: RawHandle) -> Result<(), Win32Error> {
         } else {
             Err(err)
         }
+    } else {
+        Ok(())
+    }
+}
+
+/// Disconnect the client currently connected to `pipe` (from
+/// [`create_server`]/[`connect_server`]) and reset the server instance so a
+/// subsequent [`connect_server`] call can serve a new client —
+/// `DisconnectNamedPipe`. Without this, a served pipe instance is single-use
+/// only: the whole server has to be recreated (a fresh [`create_server`]
+/// call) to talk to a second client.
+///
+/// # Safety
+///
+/// `pipe` must be a currently-open, valid named-pipe server handle from
+/// [`create_server`].
+pub unsafe fn disconnect_server(pipe: RawHandle) -> Result<(), Win32Error> {
+    // SAFETY: `pipe` is caller-supplied per this function's own safety
+    // contract.
+    let ok = unsafe { DisconnectNamedPipe(pipe) };
+    if ok == 0 {
+        Err(Win32Error::last())
     } else {
         Ok(())
     }
@@ -318,6 +341,60 @@ mod tests {
             std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(server as _) });
         let _client_file =
             std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(client as _) });
+    }
+
+    #[test]
+    fn disconnect_server_allows_reuse_by_a_second_client() {
+        let name = "rusty_win32_test_pipe_disconnect_reuse";
+        let server = create_server(
+            name,
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            1,
+            512,
+            512,
+        )
+        .expect("CreateNamedPipeW should succeed");
+
+        let first_client_thread = std::thread::spawn(move || {
+            wait_for_server(name, 5_000).expect("WaitNamedPipeW should succeed");
+            open_client(name, GENERIC_READ | GENERIC_WRITE).expect("CreateFileW should succeed")
+                as usize
+        });
+        // SAFETY: `server` is freshly created via `create_server` above, not
+        // yet connected.
+        unsafe { connect_server(server) }.expect("ConnectNamedPipeW should succeed");
+        let first_client = first_client_thread
+            .join()
+            .expect("client thread should not panic") as RawHandle;
+
+        // SAFETY: `first_client` is a freshly created, valid handle, not
+        // used again after this.
+        unsafe { crate::handle::close(first_client).unwrap() };
+        // SAFETY: `server` is a valid, currently-connected server handle;
+        // this is the operation under test.
+        unsafe { disconnect_server(server) }.expect("DisconnectNamedPipe should succeed");
+
+        // A second client connecting to the *same* server handle is exactly
+        // the scenario this primitive exists for — without it, a served
+        // instance is single-use only.
+        let second_client_thread = std::thread::spawn(move || {
+            wait_for_server(name, 5_000).expect("WaitNamedPipeW should succeed");
+            open_client(name, GENERIC_READ | GENERIC_WRITE).expect("CreateFileW should succeed")
+                as usize
+        });
+        // SAFETY: `server` is the same handle, now reset by `disconnect_server`.
+        unsafe { connect_server(server) }
+            .expect("ConnectNamedPipeW should succeed for the reused server instance");
+        let second_client = second_client_thread
+            .join()
+            .expect("client thread should not panic") as RawHandle;
+
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(server).unwrap();
+            crate::handle::close(second_client).unwrap();
+        }
     }
 
     #[test]
