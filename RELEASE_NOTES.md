@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #108 — fs: add copy_file (CopyFileW)
+**2026-07-23** · [#108](https://github.com/baileyrd/rusty_win32/pull/108)
+
+- **Added:** `fs::copy_file` (`CopyFileW`), closing issue #75 from the
+  parity-loop sweep — the primitive behind a `cp` builtin. `fail_if_exists`
+  refuses to overwrite an already-existing destination
+  ([`Win32Error::ERROR_FILE_EXISTS`]) rather than this crate deciding that
+  policy itself. Filed for tracking, not urgency: `rush` has no `cp`
+  builtin today (likely uses `std::fs::copy`), so this is a lateral/optional
+  addition unless a lower-level primitive is ever wanted.
+
 ## PR #107 — process: add set_error_mode (SetErrorMode)
 **2026-07-23** · [#107](https://github.com/baileyrd/rusty_win32/pull/107)
 

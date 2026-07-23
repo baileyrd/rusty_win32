@@ -90,6 +90,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `SEM_FAILCRITICALERRORS`/`SEM_NOOPENFILEERRORBOX`, suppressing blocking
   GUI error dialogs that would otherwise freeze a non-interactive script
   run — another parity-loop find.
+- `fs::copy_file` (`CopyFileW`), the primitive behind a `cp` builtin —
+  another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
