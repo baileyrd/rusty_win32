@@ -6,6 +6,20 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #50 — Add volume module: drive/volume enumeration (GetLogicalDrives/GetDriveTypeW/GetVolumeInformationW)
+**2026-07-23** · [#50](https://github.com/baileyrd/rusty_win32/pull/50)
+
+- **Added:** `volume::logical_drives`/`drive_type`/`volume_information`,
+  closing the round-2 assessment's remaining speculative item — a
+  distinctly Windows-shaped gap (multi-root filesystem model, no Unix
+  analog at all) rather than a fix for any current `rush`/`rusty_lines`
+  need.
+- `drive_type` never fails (matches `GetDriveTypeW`'s own contract — no
+  `GetLastError` failure mode exists for it).
+- `VolumeInformation`'s `file_system_flags` is exposed as a raw bitmask,
+  matching this crate's existing policy-free convention for other raw
+  bitmask fields (`fs::FILE_ATTRIBUTE_*`, `console::ENABLE_*`).
+
 ## PR #49 — console: add write_key_events for non-character virtual-key codes
 **2026-07-23** · [#49](https://github.com/baileyrd/rusty_win32/pull/49)
 
