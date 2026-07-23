@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `security::sid_equal` (`EqualSid`) — byte-correct SID comparison; a
+  naive memory comparison isn't safe here since a `PSID`'s trailing
+  sub-authority count varies its total size.
 - `security::sid_length`/`security::is_valid_sid`/`security::copy_sid`
   (`GetLengthSid`/`IsValidSid`/`CopySid`) — sizing, validity-checking, and
   owned-copying of an opaque `PSID`, needed anywhere a SID must outlive
