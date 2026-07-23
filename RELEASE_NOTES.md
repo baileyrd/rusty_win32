@@ -18,6 +18,15 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
   too, since these three functions' signatures need them. Another round-2
   "weak/no clear consumer" item (`gap-analysis.md`); no current `rush`
   feature asks for this.
+- **Fixed:** a CI-caught real Windows behavior in this PR's own new tests:
+  resizing the screen buffer (or even a zero-delta `SetConsoleWindowInfo`
+  call) queues a real `WINDOW_BUFFER_SIZE_EVENT` into the console's shared
+  input buffer — not a flake, a documented side effect neither new test
+  accounted for. This left spurious "ready" input queued for whichever
+  test ran next alphabetically
+  (`wait_readable_times_out_with_no_pending_input`), which failed
+  expecting no input to be pending. Fixed by flushing the input buffer at
+  the end of both new tests.
 
 ## PR #211 — console: add alloc/free/attach (AllocConsole/FreeConsole/AttachConsole)
 **2026-07-23** · [#211](https://github.com/baileyrd/rusty_win32/pull/211)

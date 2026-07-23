@@ -1355,7 +1355,7 @@ mod tests {
 
     #[test]
     fn set_screen_buffer_size_then_read_back_round_trips() {
-        let _ = ensure_console_stdin(); // guarantee a console exists first
+        let stdin = ensure_console_stdin(); // guarantee a console exists first
         let stdout = open_console("CONOUT$")
             .expect("a console output buffer should be openable once a console exists");
 
@@ -1392,22 +1392,42 @@ mod tests {
         // test ran.
         unsafe { set_screen_buffer_size(stdout, original) }
             .expect("restoring the original screen buffer size should succeed");
+
+        // A screen-buffer resize queues a real `WINDOW_BUFFER_SIZE_EVENT`
+        // into the console's shared input buffer (confirmed by this exact
+        // test breaking `wait_readable_times_out_with_no_pending_input`,
+        // which runs later alphabetically, in this crate's own CI) — flush
+        // it so this test doesn't leave input state for a later test to
+        // inherit, the same discipline `console::attach`'s test fix
+        // established for the console handle itself.
+        // SAFETY: `stdin` is a valid console input handle per
+        // `ensure_console_stdin`'s own contract.
+        unsafe { flush_input(stdin) }.expect("FlushConsoleInputBuffer should succeed");
     }
 
     #[test]
     fn set_window_info_accepts_a_zero_relative_move() {
-        let _ = ensure_console_stdin(); // guarantee a console exists first
+        let stdin = ensure_console_stdin(); // guarantee a console exists first
         let stdout = open_console("CONOUT$")
             .expect("a console output buffer should be openable once a console exists");
         // A zero-delta relative move changes nothing about the window's
-        // actual bounds, so this can't fail or leave any state for a
-        // later test to inherit — unlike a real resize/reposition, which
-        // would risk exactly the kind of shared-state leakage the
+        // actual bounds, so it can't fail or leave any *geometry* state
+        // for a later test to inherit — unlike a real resize/reposition,
+        // which would risk exactly the kind of shared-state leakage the
         // `console::attach` test caused earlier in this crate's history.
         // SAFETY: `stdout` is a valid console output handle per the
         // above; this is the operation under test.
         unsafe { set_window_info(stdout, false, SmallRect::default()) }
             .expect("SetConsoleWindowInfo should accept a zero-delta relative move");
+
+        // Even a zero-delta window-info call may still queue a
+        // `WINDOW_BUFFER_SIZE_EVENT` (the API has no way to know the
+        // caller considers this a no-op) — flush defensively, matching
+        // `set_screen_buffer_size_then_read_back_round_trips`'s fix for
+        // the same real behavior.
+        // SAFETY: `stdin` is a valid console input handle per
+        // `ensure_console_stdin`'s own contract.
+        unsafe { flush_input(stdin) }.expect("FlushConsoleInputBuffer should succeed");
     }
 
     #[test]
