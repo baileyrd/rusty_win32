@@ -63,6 +63,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   title-setting escape sequence — another parity-loop find.
 - `console::set_cursor_position` (`SetConsoleCursorPosition`), the write
   side of `window_size`'s cursor-position read — another parity-loop find.
+- `console::fill_char`/`console::fill_attribute`
+  (`FillConsoleOutputCharacterW`/`FillConsoleOutputAttribute`), a
+  clear-to-end-of-line-style redraw primitive — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

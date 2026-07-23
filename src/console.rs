@@ -60,6 +60,20 @@ unsafe extern "system" {
         buffer_info: *mut ConsoleScreenBufferInfo,
     ) -> i32;
     fn SetConsoleCursorPosition(console_output: RawHandle, cursor_position: Coord) -> i32;
+    fn FillConsoleOutputCharacterW(
+        console_output: RawHandle,
+        character: u16,
+        length: u32,
+        write_coord: Coord,
+        number_of_chars_written: *mut u32,
+    ) -> i32;
+    fn FillConsoleOutputAttribute(
+        console_output: RawHandle,
+        attribute: u16,
+        length: u32,
+        write_coord: Coord,
+        number_of_attrs_written: *mut u32,
+    ) -> i32;
     fn WaitForSingleObject(handle: RawHandle, milliseconds: u32) -> u32;
     fn WriteConsoleInputW(
         console_input: RawHandle,
@@ -542,6 +556,79 @@ pub unsafe fn set_cursor_position(
     }
 }
 
+/// Write `ch` `count` times starting at `(x, y)`, without moving the
+/// cursor — `FillConsoleOutputCharacterW`. The character-content half of a
+/// clear-to-end-of-line redraw (pair with [`fill_attribute`] to also reset
+/// color/attributes over the same span): a shorter re-rendered prompt line
+/// needs this to erase whatever longer content it's replacing, the same
+/// role a VT `\x1b[K` escape plays for a caller that assumes that path
+/// instead — this crate doesn't assume every consumer does. Returns the
+/// number of characters actually written, which is less than `count` if
+/// `(x, y) + count` runs past the end of the screen buffer.
+///
+/// # Safety
+///
+/// `console_output` must be a currently-open, valid handle to a console
+/// output buffer.
+pub unsafe fn fill_char(
+    console_output: RawHandle,
+    ch: u16,
+    x: i16,
+    y: i16,
+    count: u32,
+) -> Result<u32, Win32Error> {
+    let mut written: u32 = 0;
+    // SAFETY: `console_output` is caller-supplied per this function's own
+    // safety contract; `Coord { x, y }` is a plain-data struct passed by
+    // value, not a pointer; `written` is a valid out-pointer.
+    let ok = unsafe {
+        FillConsoleOutputCharacterW(console_output, ch, count, Coord { x, y }, &mut written)
+    };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(written)
+    }
+}
+
+/// Set the character attribute (color/style bits) `count` times starting at
+/// `(x, y)`, without changing the underlying character content or moving
+/// the cursor — `FillConsoleOutputAttribute`, the attribute-content
+/// counterpart to [`fill_char`]. Returns the number of cells actually
+/// written, which is less than `count` if `(x, y) + count` runs past the
+/// end of the screen buffer.
+///
+/// # Safety
+///
+/// `console_output` must be a currently-open, valid handle to a console
+/// output buffer.
+pub unsafe fn fill_attribute(
+    console_output: RawHandle,
+    attribute: u16,
+    x: i16,
+    y: i16,
+    count: u32,
+) -> Result<u32, Win32Error> {
+    let mut written: u32 = 0;
+    // SAFETY: `console_output` is caller-supplied per this function's own
+    // safety contract; `Coord { x, y }` is a plain-data struct passed by
+    // value, not a pointer; `written` is a valid out-pointer.
+    let ok = unsafe {
+        FillConsoleOutputAttribute(
+            console_output,
+            attribute,
+            count,
+            Coord { x, y },
+            &mut written,
+        )
+    };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(written)
+    }
+}
+
 /// Synthesize `text` as a sequence of real console key events —
 /// `WriteConsoleInputW`, the standard, documented technique console
 /// automation tools use to inject keystrokes (queues `INPUT_RECORD`s into
@@ -923,6 +1010,30 @@ mod tests {
         assert_ne!(ok, 0, "GetConsoleScreenBufferInfo should succeed");
         assert_eq!(info.cursor_position.x, 3);
         assert_eq!(info.cursor_position.y, 2);
+    }
+
+    #[test]
+    fn fill_char_writes_the_requested_count() {
+        let _ = ensure_console_stdin(); // guarantee a console exists first
+        let stdout = open_console("CONOUT$")
+            .expect("a console output buffer should be openable once a console exists");
+
+        // SAFETY: `stdout` is a valid console output handle per the above.
+        let written = unsafe { fill_char(stdout, u16::from(b'x'), 0, 0, 5) }
+            .expect("FillConsoleOutputCharacterW should succeed");
+        assert_eq!(written, 5);
+    }
+
+    #[test]
+    fn fill_attribute_writes_the_requested_count() {
+        let _ = ensure_console_stdin(); // guarantee a console exists first
+        let stdout = open_console("CONOUT$")
+            .expect("a console output buffer should be openable once a console exists");
+
+        // SAFETY: `stdout` is a valid console output handle per the above.
+        let written = unsafe { fill_attribute(stdout, 0x0007, 0, 0, 5) }
+            .expect("FillConsoleOutputAttribute should succeed");
+        assert_eq!(written, 5);
     }
 
     /// The empirical validation this whole primitive exists for: does a
