@@ -188,6 +188,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `process::set_unhandled_exception_filter` (`SetUnhandledExceptionFilter`),
   structured-exception-handling hooks — the closest Windows analog to
   installing a Unix `SIGSEGV`/`SIGABRT` handler — another round-2 item.
+- `console::process_list` (`GetConsoleProcessList`), the pids of every
+  process attached to the calling process's console — another round-2
+  item.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

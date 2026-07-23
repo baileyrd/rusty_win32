@@ -6,6 +6,16 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #209 — console: add process_list (GetConsoleProcessList)
+**2026-07-23** · [#209](https://github.com/baileyrd/rusty_win32/pull/209)
+
+- **Added:** `console::process_list` (`GetConsoleProcessList`), closing
+  issue #138 — the pids of every process currently attached to the
+  calling process's console, e.g. for an "is anything else still
+  attached to this console" check. Another round-2 "weak/no clear
+  consumer" item (`gap-analysis.md`); no current `rush` feature asks for
+  this.
+
 ## PR #208 — process: add exception-handler hooks (AddVectoredExceptionHandler/SetUnhandledExceptionFilter)
 **2026-07-23** · [#208](https://github.com/baileyrd/rusty_win32/pull/208)
 

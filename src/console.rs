@@ -76,6 +76,7 @@ unsafe extern "system" {
     ) -> i32;
     fn FlushConsoleInputBuffer(console_input: RawHandle) -> i32;
     fn GetNumberOfConsoleInputEvents(console_input: RawHandle, number_of_events: *mut u32) -> i32;
+    fn GetConsoleProcessList(process_list: *mut u32, process_count: u32) -> u32;
     fn WaitForSingleObject(handle: RawHandle, milliseconds: u32) -> u32;
     fn WriteConsoleInputW(
         console_input: RawHandle,
@@ -673,6 +674,36 @@ pub unsafe fn pending_input_events(console_input: RawHandle) -> Result<u32, Win3
     }
 }
 
+/// The pids of every process currently attached to the calling process's
+/// console — `GetConsoleProcessList`, e.g. for an "is anything else still
+/// attached to this console" check. No current `rush` feature asks for
+/// this; filed for Win32 parity.
+pub fn process_list() -> Result<alloc::vec::Vec<u32>, Win32Error> {
+    let mut buf: alloc::vec::Vec<u32> = alloc::vec![0u32; 8];
+    // `GetConsoleProcessList` reports how many pids it actually needed
+    // (which can be larger than the buffer just tried) in its own return
+    // value — grow to that exact size and retry, the same shape this
+    // crate's other "ask, then maybe grow" calls use, just via a return
+    // value instead of an `ERROR_INSUFFICIENT_BUFFER`/ in-out size
+    // parameter.
+    for _ in 0..2 {
+        // SAFETY: `buf` is a valid, `buf.len()`-element writable buffer
+        // matched by the `process_count` argument naming its exact
+        // length.
+        let needed = unsafe { GetConsoleProcessList(buf.as_mut_ptr(), buf.len() as u32) };
+        if needed == 0 {
+            return Err(Win32Error::last());
+        }
+        if (needed as usize) > buf.len() {
+            buf.resize(needed as usize, 0);
+            continue;
+        }
+        buf.truncate(needed as usize);
+        return Ok(buf);
+    }
+    Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
+}
+
 /// Synthesize `text` as a sequence of real console key events —
 /// `WriteConsoleInputW`, the standard, documented technique console
 /// automation tools use to inject keystrokes (queues `INPUT_RECORD`s into
@@ -1074,6 +1105,16 @@ mod tests {
 
         // SAFETY: same handle; leave the input buffer clean for other tests.
         unsafe { flush_input(stdin) }.expect("FlushConsoleInputBuffer should succeed");
+    }
+
+    #[test]
+    fn process_list_includes_the_calling_process_itself() {
+        let _ = ensure_console_stdin(); // guarantee a console exists first
+        let pids = process_list().expect("GetConsoleProcessList should succeed");
+        assert!(
+            pids.contains(&crate::process::current_pid()),
+            "the calling process should be attached to its own console, got: {pids:?}"
+        );
     }
 
     #[test]
