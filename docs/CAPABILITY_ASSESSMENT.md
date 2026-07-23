@@ -140,3 +140,72 @@ behaves correctly on Windows at all, versus everything else here being a
 robustness/ergonomics/observability improvement on already-working
 functionality. `process`-level `TerminateProcess` and `PeekNamedPipe` are the
 next two most load-bearing for job control specifically.
+
+---
+
+## Round 2 (2026-07-23)
+
+All twelve items above shipped and merged (`main` @ `5050b61`). This second
+pass re-reads every module end to end at that commit and cross-checks against
+`rush`'s actual `rusty_win32::` call sites and its own docs
+(`WINDOWS_BACKEND_ANALYSIS.md`, `WINDOWS_JOB_CONTROL.md`,
+`ASYNC_JOB_NOTIFICATIONS.md`, `CAPABILITY_GAPS.md`), which round 1 didn't have
+access to. Nothing below repeats a round-1 item.
+
+### Must-have
+
+- **Process-group-scoped Ctrl-C/Ctrl-Break delivery.** Nothing requests
+  `CREATE_NEW_PROCESS_GROUP` on spawn, and there's no `GenerateConsoleCtrlEvent`
+  wrapper. `rush`'s own Windows analysis (§4.5) already flags this as
+  unverified and dangerous: a Ctrl-C during a running child likely hits the
+  shell and the child at once, instead of being scoped to just the child the
+  way a Unix process group scopes a terminal signal. Note
+  `GenerateConsoleCtrlEvent(CTRL_C_EVENT, groupId)` fails for any nonzero
+  `groupId` — only `CTRL_BREAK_EVENT` can be scoped to a specific group, so
+  the real fix delivers Ctrl-Break, not Ctrl-C.
+- **`GetProcessTimes` wrapper.** `rush`'s `time` builtin prints
+  `user 0m0.000s`/`sys 0m0.000s` unconditionally on Windows today (only Linux
+  reads `/proc/self/stat`) — a visibly *wrong* output, not merely a missing
+  one. A `process::times(handle)` wrapper mirroring the crate's existing
+  `FileTime`→`Timespec` conversion pattern fixes it directly.
+
+### Nice-to-have (tied to a named, already-deferred rush feature)
+
+- **Job Object CPU/IO accounting + resource limits**
+  (`JobObjectBasicAndIoAccountingInformation`, the limit fields already
+  modeled bit-for-bit in `job.rs`'s private structs but never set beyond
+  kill-on-close). `rush`'s `ulimit` is a flat "not supported" on Windows
+  today; both sides' docs name Job-Object limits as the only realistic
+  partial fix, and the FFI groundwork already exists — cheap to extend.
+- **Named pipes** (`CreateNamedPipeW`/`ConnectNamedPipeW`/`WaitNamedPipeW`).
+  The one concrete missing primitive blocking `rush`'s already-deferred
+  process substitution (`<(cmd)`) and `coproc` on Windows — anonymous pipes
+  have no name an arbitrary already-running program can open. Real design
+  work needed (handshake, cleanup, blocking-vs-overlapped connect).
+- **Virtual-key-code support in `write_char_events`** (or a sibling
+  `write_key_events`). Only printable-character input can be synthesized for
+  tests today; arrows/Home/End/function keys carry no `uChar` and can't be
+  injected, blocking a Windows-side test suite for `rusty_lines`'
+  history/cursor/keymap navigation.
+
+### Speculative (no current consumer, flagged for completeness)
+
+- Drive/volume enumeration (`GetLogicalDrives`, `GetVolumeInformationW`).
+- 8.3 short-path / long-path normalization (`GetShortPathNameW`/`GetLongPathNameW`).
+- Filesystem change notification (`ReadDirectoryChangesW`) — real
+  async/overlapped-I/O design, buffer-overflow handling.
+
+### API-consistency wart (not a bug)
+
+`job::process_ids` returns `Vec<usize>` where every other pid-carrying value
+in the crate (`ProcessEntry.pid`, `JobMessage.pid`, `SpawnedProcess.process_id`,
+`open_by_pid`'s parameter) is `u32`. Every value returned is still a valid
+pid — this is a typing inconsistency, not a bug — but worth either narrowing
+it to `Vec<u32>` or documenting why this one function alone exposes the
+native pointer-sized type.
+
+No other correctness bugs found on this pass: the completion-port message
+decoding, buffer-resize retry loops (`job::process_ids`,
+`path::search_path`, `fs::final_path`), and `FILETIME` conversions all check
+out. Registry access, security descriptors/ACLs, service control, and WMI
+remain correctly unaddressed — no new evidence of need for any of them.
