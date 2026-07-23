@@ -32,6 +32,11 @@ unsafe extern "system" {
     ) -> RawHandle;
     fn OpenServiceW(scm: RawHandle, service_name: *const u16, desired_access: u32) -> RawHandle;
     fn CloseServiceHandle(handle: RawHandle) -> i32;
+    fn StartServiceW(
+        handle: RawHandle,
+        num_service_args: u32,
+        service_arg_vectors: *const *const u16,
+    ) -> i32;
     fn QueryServiceStatusEx(
         handle: RawHandle,
         info_level: u32,
@@ -70,6 +75,10 @@ pub const SERVICE_QUERY_CONFIG: u32 = 0x0001;
 /// `SERVICE_QUERY_STATUS`. Verified against mingw-w64's own `winsvc.h`
 /// with a compiled `_Static_assert` probe.
 pub const SERVICE_QUERY_STATUS: u32 = 0x0004;
+
+/// `SERVICE_START` — the access right [`start`] needs. Verified against
+/// mingw-w64's own `winsvc.h` with a compiled `_Static_assert` probe.
+pub const SERVICE_START: u32 = 0x0010;
 
 /// Connect to the local Service Control Manager — `OpenSCManagerW`, the
 /// entry point every other function in this module needs (directly, or
@@ -127,6 +136,26 @@ pub unsafe fn close(handle: RawHandle) -> Result<(), Win32Error> {
     // SAFETY: `handle` is caller-supplied per this function's own safety
     // contract.
     let ok = unsafe { CloseServiceHandle(handle) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
+/// Start an already-installed service — `StartServiceW`, the
+/// zero-argument case only (`lpServiceArgVectors` only matters for
+/// driver-style services, out of this module's scope).
+///
+/// # Safety
+///
+/// `handle` must be a currently-open, valid service handle from
+/// [`open_service`] with at least [`SERVICE_START`].
+pub unsafe fn start(handle: RawHandle) -> Result<(), Win32Error> {
+    // SAFETY: `handle` is caller-supplied per this function's own safety
+    // contract; `0`/null is documented as "no service-specific
+    // arguments," the only case this module supports.
+    let ok = unsafe { StartServiceW(handle, 0, core::ptr::null()) };
     if ok == 0 {
         Err(Win32Error::last())
     } else {
@@ -538,6 +567,39 @@ mod tests {
                 "a running service should report a nonzero backing process id"
             );
         }
+
+        // SAFETY: `service`/`scm` are still open (not yet closed).
+        unsafe { close(service) }.expect("CloseServiceHandle should succeed on the service handle");
+        unsafe { close(scm) }.expect("CloseServiceHandle should succeed on the SCM handle");
+    }
+
+    #[test]
+    fn start_fails_with_already_running_for_the_event_log_service() {
+        // EventLog is a core OS service that's always already running by
+        // the time this test executes -- calling `start` on it exercises
+        // the real `StartServiceW` error path without this test actually
+        // starting or stopping anything on the CI machine (a
+        // non-destructive test, matching this crate's existing
+        // discipline of avoiding side effects on shared system state).
+        let scm = open_manager(SC_MANAGER_CONNECT)
+            .expect("OpenSCManagerW should succeed with SC_MANAGER_CONNECT");
+        // SAFETY: `scm` is valid and open from the call just above.
+        let service =
+            unsafe { open_service(scm, "EventLog", SERVICE_START | SERVICE_QUERY_STATUS) }
+                .expect("OpenServiceW should succeed for the well-known EventLog service");
+
+        // SAFETY: `service` is valid and open from the call just above.
+        let status = unsafe { status(service) }
+            .expect("QueryServiceStatusEx should succeed for a valid service handle");
+        assert_eq!(
+            status.current_state, SERVICE_RUNNING,
+            "EventLog should already be running by the time this test runs"
+        );
+
+        // SAFETY: `service` is valid and open from the call just above.
+        let err = unsafe { start(service) }
+            .expect_err("StartServiceW should fail for an already-running service");
+        assert_eq!(err, Win32Error::ERROR_SERVICE_ALREADY_RUNNING);
 
         // SAFETY: `service`/`scm` are still open (not yet closed).
         unsafe { close(service) }.expect("CloseServiceHandle should succeed on the service handle");

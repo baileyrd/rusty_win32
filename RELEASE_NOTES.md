@@ -6,6 +6,20 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #239 — service: add start
+**2026-07-23** · [#239](https://github.com/baileyrd/rusty_win32/pull/239)
+
+- **Added:** `service::start` (`StartServiceW`) plus `SERVICE_START`,
+  closing issue #168 — start an already-installed service, the
+  zero-argument case only (`lpServiceArgVectors` only matters for
+  driver-style services, out of scope). Also adds
+  `Win32Error::ERROR_SERVICE_ALREADY_RUNNING` (1056), needed for
+  `start`'s error path. Tested non-destructively: calling `start` on the
+  well-known "EventLog" service (already running by the time the test
+  executes, confirmed via PR #238's `status`) exercises the real
+  `StartServiceW` failure path without this crate's own test suite
+  actually starting or stopping anything on the CI machine.
+
 ## PR #238 — service: add status
 **2026-07-23** · [#238](https://github.com/baileyrd/rusty_win32/pull/238)
 
