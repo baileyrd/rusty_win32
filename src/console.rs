@@ -94,6 +94,13 @@ unsafe extern "system" {
     fn AllocConsole() -> i32;
     fn FreeConsole() -> i32;
     fn AttachConsole(process_id: u32) -> i32;
+    fn GetLargestConsoleWindowSize(console_output: RawHandle) -> Coord;
+    fn SetConsoleScreenBufferSize(console_output: RawHandle, size: Coord) -> i32;
+    fn SetConsoleWindowInfo(
+        console_output: RawHandle,
+        absolute: i32,
+        console_window: *const SmallRect,
+    ) -> i32;
 }
 
 // `MapVirtualKeyW` lives in user32.dll, not kernel32.dll — this crate's
@@ -180,20 +187,27 @@ pub const DISABLE_NEWLINE_AUTO_RETURN: u32 = 0x0008;
 // 22, `align_of` 2 on x86_64. Verified against mingw-w64's `wincon.h` the
 // same way as `process.rs`/`job.rs`'s structs (a `_Static_assert` probe
 // compiled with `x86_64-w64-mingw32-gcc` against the real header).
+/// A console character-cell coordinate — `COORD`, e.g. a screen-buffer
+/// size or a cursor position. `x` is the column, `y` the row, both
+/// 0-based.
 #[repr(C)]
-#[derive(Default, Clone, Copy)]
-struct Coord {
-    x: i16,
-    y: i16,
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Coord {
+    pub x: i16,
+    pub y: i16,
 }
 
+/// A console character-cell rectangle — `SMALL_RECT`, e.g. the visible
+/// window's extent within the (potentially larger) screen buffer. All
+/// four bounds are inclusive, matching `CONSOLE_SCREEN_BUFFER_INFO`'s own
+/// `srWindow`.
 #[repr(C)]
-#[derive(Default, Clone, Copy)]
-struct SmallRect {
-    left: i16,
-    top: i16,
-    right: i16,
-    bottom: i16,
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SmallRect {
+    pub left: i16,
+    pub top: i16,
+    pub right: i16,
+    pub bottom: i16,
 }
 
 #[repr(C)]
@@ -533,6 +547,83 @@ pub unsafe fn window_size(console_output: RawHandle) -> Result<(u16, u16), Win32
     let cols = (info.window.right - info.window.left + 1).max(0) as u16;
     let rows = (info.window.bottom - info.window.top + 1).max(0) as u16;
     Ok((cols, rows))
+}
+
+/// The largest the console window could be resized to, in character
+/// cells, given the current font and the display it's on —
+/// `GetLargestConsoleWindowSize`. The write-side counterpart to
+/// [`window_size`]'s read-only report: a caller planning a
+/// [`set_screen_buffer_size`]/[`set_window_info`] resize needs this as the
+/// upper bound, since requesting a window larger than this fails.
+/// Documented as reporting `(0, 0)` on failure rather than a separate
+/// error path — matching this crate's already-established "never fails in
+/// practice" pattern (e.g. `GetDriveTypeW`) since a real console can't
+/// legitimately have a zero-cell maximum.
+///
+/// # Safety
+///
+/// `console_output` must be a currently-open, valid handle to a console
+/// output buffer.
+pub unsafe fn largest_window_size(console_output: RawHandle) -> Coord {
+    // SAFETY: `console_output` is caller-supplied per this function's own
+    // safety contract; `GetLargestConsoleWindowSize` has no other
+    // precondition and returns a plain-data `COORD` by value.
+    unsafe { GetLargestConsoleWindowSize(console_output) }
+}
+
+/// Resize the screen buffer (the full scrollback extent, `dwSize` in
+/// `CONSOLE_SCREEN_BUFFER_INFO` — not the visible window; see
+/// [`set_window_info`] for that) — `SetConsoleScreenBufferSize`. Fails
+/// with `ERROR_INVALID_PARAMETER` if `size` is smaller than the current
+/// visible window in either dimension, since the buffer can never be
+/// smaller than what's currently shown.
+///
+/// # Safety
+///
+/// `console_output` must be a currently-open, valid handle to a console
+/// output buffer.
+pub unsafe fn set_screen_buffer_size(
+    console_output: RawHandle,
+    size: Coord,
+) -> Result<(), Win32Error> {
+    // SAFETY: `console_output` is caller-supplied per this function's own
+    // safety contract; `size` is a plain-data struct passed by value, not
+    // a pointer.
+    let ok = unsafe { SetConsoleScreenBufferSize(console_output, size) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
+/// Resize/reposition the visible window within the screen buffer (the
+/// `srWindow` half of console geometry — not the buffer itself; see
+/// [`set_screen_buffer_size`] for that) — `SetConsoleWindowInfo`.
+/// `absolute` selects whether `rect` is the window's new absolute bounds
+/// (`true`) or an offset added to its current bounds (`false`, matching
+/// `SetConsoleWindowInfo`'s own `bAbsolute` parameter). Fails with
+/// `ERROR_INVALID_PARAMETER` if `rect` would place the window outside the
+/// current screen buffer or past [`largest_window_size`].
+///
+/// # Safety
+///
+/// `console_output` must be a currently-open, valid handle to a console
+/// output buffer.
+pub unsafe fn set_window_info(
+    console_output: RawHandle,
+    absolute: bool,
+    rect: SmallRect,
+) -> Result<(), Win32Error> {
+    // SAFETY: `console_output` is caller-supplied per this function's own
+    // safety contract; `&rect` is a valid pointer to a plain-data struct
+    // live for the whole call.
+    let ok = unsafe { SetConsoleWindowInfo(console_output, i32::from(absolute), &rect) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
 }
 
 /// Move the cursor to `(x, y)` (0-based column/row, relative to the screen
@@ -1247,6 +1338,96 @@ mod tests {
             unsafe { window_size(stdout) }.expect("GetConsoleScreenBufferInfo should succeed");
         assert!(cols > 0, "a real console should report a nonzero width");
         assert!(rows > 0, "a real console should report a nonzero height");
+    }
+
+    #[test]
+    fn largest_window_size_reports_a_plausible_maximum() {
+        let _ = ensure_console_stdin(); // guarantee a console exists first
+        let stdout = open_console("CONOUT$")
+            .expect("a console output buffer should be openable once a console exists");
+        // SAFETY: `stdout` is a valid console output handle per the above.
+        let size = unsafe { largest_window_size(stdout) };
+        assert!(
+            size.x > 0 && size.y > 0,
+            "a real console should report a nonzero maximum window size, got {size:?}"
+        );
+    }
+
+    #[test]
+    fn set_screen_buffer_size_then_read_back_round_trips() {
+        let stdin = ensure_console_stdin(); // guarantee a console exists first
+        let stdout = open_console("CONOUT$")
+            .expect("a console output buffer should be openable once a console exists");
+
+        let mut info = ConsoleScreenBufferInfo::default();
+        // SAFETY: `stdout` is a valid console output handle; `info` is a
+        // valid, correctly-sized out-pointer.
+        let ok = unsafe { GetConsoleScreenBufferInfo(stdout, &mut info) };
+        assert_ne!(ok, 0, "GetConsoleScreenBufferInfo should succeed");
+        let original = info.size;
+
+        // Only ever grows the buffer (never shrinks below the current
+        // visible window), so this can't fail with
+        // `ERROR_INVALID_PARAMETER` regardless of the window's own
+        // current extent.
+        let grown = Coord {
+            x: original.x,
+            y: original.y + 1,
+        };
+        // SAFETY: `stdout` is the same valid handle; this is the
+        // operation under test.
+        unsafe { set_screen_buffer_size(stdout, grown) }
+            .expect("SetConsoleScreenBufferSize should succeed growing the buffer");
+
+        let mut after = ConsoleScreenBufferInfo::default();
+        // SAFETY: see above.
+        let ok = unsafe { GetConsoleScreenBufferInfo(stdout, &mut after) };
+        assert_ne!(ok, 0, "GetConsoleScreenBufferInfo should succeed");
+        assert_eq!(after.size, grown);
+
+        // Restore the original size so this test doesn't leak state into
+        // others.
+        // SAFETY: `stdout` is still the same valid handle; `original` was
+        // already a valid size for this same buffer/window before this
+        // test ran.
+        unsafe { set_screen_buffer_size(stdout, original) }
+            .expect("restoring the original screen buffer size should succeed");
+
+        // A screen-buffer resize queues a real `WINDOW_BUFFER_SIZE_EVENT`
+        // into the console's shared input buffer (confirmed by this exact
+        // test breaking `wait_readable_times_out_with_no_pending_input`,
+        // which runs later alphabetically, in this crate's own CI) — flush
+        // it so this test doesn't leave input state for a later test to
+        // inherit, the same discipline `console::attach`'s test fix
+        // established for the console handle itself.
+        // SAFETY: `stdin` is a valid console input handle per
+        // `ensure_console_stdin`'s own contract.
+        unsafe { flush_input(stdin) }.expect("FlushConsoleInputBuffer should succeed");
+    }
+
+    #[test]
+    fn set_window_info_accepts_a_zero_relative_move() {
+        let stdin = ensure_console_stdin(); // guarantee a console exists first
+        let stdout = open_console("CONOUT$")
+            .expect("a console output buffer should be openable once a console exists");
+        // A zero-delta relative move changes nothing about the window's
+        // actual bounds, so it can't fail or leave any *geometry* state
+        // for a later test to inherit — unlike a real resize/reposition,
+        // which would risk exactly the kind of shared-state leakage the
+        // `console::attach` test caused earlier in this crate's history.
+        // SAFETY: `stdout` is a valid console output handle per the
+        // above; this is the operation under test.
+        unsafe { set_window_info(stdout, false, SmallRect::default()) }
+            .expect("SetConsoleWindowInfo should accept a zero-delta relative move");
+
+        // Even a zero-delta window-info call may still queue a
+        // `WINDOW_BUFFER_SIZE_EVENT` (the API has no way to know the
+        // caller considers this a no-op) — flush defensively, matching
+        // `set_screen_buffer_size_then_read_back_round_trips`'s fix for
+        // the same real behavior.
+        // SAFETY: `stdin` is a valid console input handle per
+        // `ensure_console_stdin`'s own contract.
+        unsafe { flush_input(stdin) }.expect("FlushConsoleInputBuffer should succeed");
     }
 
     #[test]

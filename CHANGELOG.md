@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `console::largest_window_size`/`console::set_screen_buffer_size`/
+  `console::set_window_info` (`GetLargestConsoleWindowSize`/
+  `SetConsoleScreenBufferSize`/`SetConsoleWindowInfo`) plus public
+  `Coord`/`SmallRect` types, the write side of console geometry
+  (`window_size` was already read-only).
 - `console::alloc`/`console::free`/`console::attach` (`AllocConsole`/
   `FreeConsole`/`AttachConsole`), letting a GUI-subsystem process acquire,
   release, or reattach to a console on demand (`attach(None)` maps to
