@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `registry::open_key`/`registry::close_key` (`RegOpenKeyExW`/
+  `RegCloseKey`) plus `KEY_READ`/`KEY_WRITE`/`KEY_ALL_ACCESS`/
+  `KEY_QUERY_VALUE` REGSAM constants — opening a subkey of a predefined
+  root (or another already-open key) and closing it again.
 - `registry` module (new subsystem): `HKey` type plus the five predefined
   root keys (`HKEY_CLASSES_ROOT`/`HKEY_CURRENT_USER`/`HKEY_LOCAL_MACHINE`/
   `HKEY_USERS`/`HKEY_CURRENT_CONFIG`), the first piece of Windows Registry
