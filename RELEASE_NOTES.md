@@ -6,6 +6,25 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #237 — service: add enum_services
+**2026-07-23** · [#237](https://github.com/baileyrd/rusty_win32/pull/237)
+
+- **Added:** `service::enum_services` (`EnumServicesStatusExW`) plus
+  `ServiceStatusEntry` and `SC_MANAGER_ENUMERATE_SERVICE`/`SERVICE_WIN32`/
+  `SERVICE_ACTIVE`/`SERVICE_INACTIVE`/`SERVICE_STATE_ALL`, closing issue
+  #166 — list every service known to the SCM with its current status,
+  the core of a `systemctl list-units`-equivalent. Pages internally via
+  `EnumServicesStatusExW`'s own resume-handle protocol: grows the buffer
+  and retries the same page only when nothing at all fit
+  (`ERROR_MORE_DATA` with zero entries returned), otherwise processes
+  whatever entries came back — including on a partial-page
+  `ERROR_MORE_DATA` — and continues until the call finally succeeds.
+  `lpServiceName`/`lpDisplayName` point into the same buffer the call
+  fills (via a new `decode_wide_cstr` helper handling the
+  possibly-unaligned string data), copied out into owned `String`s
+  before the buffer drops. Tested against the well-known "EventLog"
+  service (PR #236's same choice), present on every Windows edition.
+
 ## PR #236 — service: add open_manager/open_service/close
 **2026-07-23** · [#236](https://github.com/baileyrd/rusty_win32/pull/236)
 

@@ -32,12 +32,29 @@ unsafe extern "system" {
     ) -> RawHandle;
     fn OpenServiceW(scm: RawHandle, service_name: *const u16, desired_access: u32) -> RawHandle;
     fn CloseServiceHandle(handle: RawHandle) -> i32;
+    fn EnumServicesStatusExW(
+        scm: RawHandle,
+        info_level: u32,
+        service_type: u32,
+        service_state: u32,
+        services: *mut u8,
+        buf_size: u32,
+        bytes_needed: *mut u32,
+        services_returned: *mut u32,
+        resume_handle: *mut u32,
+        group_name: *const u16,
+    ) -> i32;
 }
 
 /// `SC_MANAGER_CONNECT` — the minimal access right needed to open a
 /// connection to the SCM at all. Verified against mingw-w64's own
 /// `winsvc.h` with a compiled `_Static_assert` probe.
 pub const SC_MANAGER_CONNECT: u32 = 0x0001;
+
+/// `SC_MANAGER_ENUMERATE_SERVICE` — the access right [`enum_services`]
+/// needs in addition to [`SC_MANAGER_CONNECT`]. Verified against
+/// mingw-w64's own `winsvc.h` with a compiled `_Static_assert` probe.
+pub const SC_MANAGER_ENUMERATE_SERVICE: u32 = 0x0004;
 
 /// `SERVICE_QUERY_CONFIG`. Verified against mingw-w64's own `winsvc.h`
 /// with a compiled `_Static_assert` probe.
@@ -110,6 +127,211 @@ pub unsafe fn close(handle: RawHandle) -> Result<(), Win32Error> {
     }
 }
 
+/// `SC_ENUM_PROCESS_INFO` — `EnumServicesStatusExW`'s only defined
+/// `SC_ENUM_TYPE` value (the `InfoLevel` parameter always takes this;
+/// Windows has never defined another). Verified against mingw-w64's own
+/// `winsvc.h` with a compiled `_Static_assert` probe.
+const SC_ENUM_PROCESS_INFO: u32 = 0;
+
+/// `SERVICE_WIN32` — ordinary user-mode services (`SERVICE_WIN32_OWN_PROCESS`
+/// `|` `SERVICE_WIN32_SHARE_PROCESS`), this module's only supported
+/// [`enum_services`] `dwServiceType` value; driver services
+/// (`SERVICE_DRIVER`) are out of this module's scope. Verified against
+/// mingw-w64's own `winnt.h` with a compiled `_Static_assert` probe.
+pub const SERVICE_WIN32: u32 = 0x30;
+
+/// `SERVICE_ACTIVE`. Verified against mingw-w64's own `winsvc.h` with a
+/// compiled `_Static_assert` probe.
+pub const SERVICE_ACTIVE: u32 = 0x0000_0001;
+
+/// `SERVICE_INACTIVE`. Verified against mingw-w64's own `winsvc.h` with a
+/// compiled `_Static_assert` probe.
+pub const SERVICE_INACTIVE: u32 = 0x0000_0002;
+
+/// `SERVICE_STATE_ALL` (`SERVICE_ACTIVE` `|` `SERVICE_INACTIVE`) —
+/// [`enum_services`]'s default `dwServiceState` value. Verified against
+/// mingw-w64's own `winsvc.h` with a compiled `_Static_assert` probe.
+pub const SERVICE_STATE_ALL: u32 = SERVICE_ACTIVE | SERVICE_INACTIVE;
+
+// SERVICE_STATUS_PROCESS: `size_of` 36 — nine plain `DWORD`s, no padding.
+// Verified against mingw-w64's own `winsvc.h` with a compiled
+// `_Static_assert` probe.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ServiceStatusProcess {
+    service_type: u32,
+    current_state: u32,
+    controls_accepted: u32,
+    win32_exit_code: u32,
+    service_specific_exit_code: u32,
+    check_point: u32,
+    wait_hint: u32,
+    process_id: u32,
+    service_flags: u32,
+}
+const _: () = assert!(core::mem::size_of::<ServiceStatusProcess>() == 36);
+
+// ENUM_SERVICE_STATUS_PROCESSW: `size_of` 56, `ServiceStatusProcess` at
+// offset 16 — two pointers plus the fixed status block above. Verified
+// against mingw-w64's own `winsvc.h` with a compiled `_Static_assert`
+// probe. `lpServiceName`/`lpDisplayName` point into the same buffer
+// `EnumServicesStatusExW` filled, not separately owned/freed — this
+// crate copies them out into owned `String`s before the buffer is
+// dropped.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct EnumServiceStatusProcessW {
+    service_name: *mut u16,
+    display_name: *mut u16,
+    service_status_process: ServiceStatusProcess,
+}
+const _: () = assert!(core::mem::size_of::<EnumServiceStatusProcessW>() == 56);
+const _: () =
+    assert!(core::mem::offset_of!(EnumServiceStatusProcessW, service_status_process) == 16);
+
+/// One service's name, display name, and current status, as returned by
+/// [`enum_services`] — the core of a `systemctl list-units`-equivalent.
+/// Every field beyond the two names is copied straight out of
+/// `SERVICE_STATUS_PROCESS`, exposed raw and policy-free, matching this
+/// crate's existing convention for other bitmask/status fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceStatusEntry {
+    pub service_name: alloc::string::String,
+    pub display_name: alloc::string::String,
+    pub service_type: u32,
+    pub current_state: u32,
+    pub controls_accepted: u32,
+    pub win32_exit_code: u32,
+    pub service_specific_exit_code: u32,
+    pub check_point: u32,
+    pub wait_hint: u32,
+    pub process_id: u32,
+    pub service_flags: u32,
+}
+
+/// Decode a NUL-terminated wide string pointed to by `ptr` — used for
+/// [`enum_services`]'s name/display-name fields, which point into a
+/// buffer this crate itself allocated and doesn't guarantee any
+/// particular alignment for beyond `u8`.
+///
+/// # Safety
+///
+/// `ptr`, if non-null, must point to a NUL-terminated, readable sequence
+/// of `u16`s.
+unsafe fn decode_wide_cstr(ptr: *const u16) -> alloc::string::String {
+    if ptr.is_null() {
+        return alloc::string::String::new();
+    }
+    let mut len = 0usize;
+    // SAFETY: `ptr` is caller-supplied per this function's own safety
+    // contract; `read_unaligned` doesn't require `ptr` (or `ptr.add(len)`)
+    // to be 2-byte aligned.
+    while unsafe { core::ptr::read_unaligned(ptr.add(len)) } != 0 {
+        len += 1;
+    }
+    let mut units = Vec::with_capacity(len);
+    for i in 0..len {
+        // SAFETY: same contract as above; `i` is within `0..len`, the
+        // range just walked to find the terminating NUL.
+        units.push(unsafe { core::ptr::read_unaligned(ptr.add(i)) });
+    }
+    alloc::string::String::from_utf16_lossy(&units)
+}
+
+/// List every service known to the SCM with its current status —
+/// `EnumServicesStatusExW`, the core of a `systemctl list-units`-
+/// equivalent. Pages internally via the resume-handle protocol
+/// `EnumServicesStatusExW` itself documents (growing the buffer and
+/// retrying the same page on `ERROR_INSUFFICIENT_BUFFER`/
+/// `ERROR_MORE_DATA` with zero entries returned; otherwise processing
+/// whatever entries came back and continuing until the call finally
+/// succeeds) until the whole database has been walked.
+///
+/// # Safety
+///
+/// `scm` must be a currently-open, valid SCM handle from
+/// [`open_manager`] with at least [`SC_MANAGER_CONNECT`] `|`
+/// [`SC_MANAGER_ENUMERATE_SERVICE`].
+pub unsafe fn enum_services(scm: RawHandle) -> Result<Vec<ServiceStatusEntry>, Win32Error> {
+    let mut entries = Vec::new();
+    let mut resume_handle: u32 = 0;
+    let mut buf_len: u32 = 16 * 1024;
+    loop {
+        let mut buf: Vec<u8> = alloc::vec![0u8; buf_len as usize];
+        let mut bytes_needed: u32 = 0;
+        let mut services_returned: u32 = 0;
+        // SAFETY: `scm` is caller-supplied per this function's own safety
+        // contract; `buf` is a valid buffer matched by `buf_len` naming
+        // its exact size; `bytes_needed`/`services_returned`/
+        // `resume_handle` are valid in/out-pointers; a null `group_name`
+        // means "don't filter by group".
+        let ok = unsafe {
+            EnumServicesStatusExW(
+                scm,
+                SC_ENUM_PROCESS_INFO,
+                SERVICE_WIN32,
+                SERVICE_STATE_ALL,
+                buf.as_mut_ptr(),
+                buf_len,
+                &mut bytes_needed,
+                &mut services_returned,
+                &mut resume_handle,
+                core::ptr::null(),
+            )
+        };
+        if ok == 0 {
+            let err = Win32Error::last();
+            if err != Win32Error::ERROR_MORE_DATA {
+                return Err(err);
+            }
+            if services_returned == 0 {
+                // The buffer couldn't fit even one entry this page --
+                // grow to the reported requirement and retry the exact
+                // same page (the resume handle is untouched when nothing
+                // was consumed).
+                buf_len = bytes_needed.max(buf_len * 2);
+                continue;
+            }
+        }
+
+        // SAFETY: `EnumServicesStatusExW` guarantees `services_returned`
+        // fixed-size `EnumServiceStatusProcessW` records packed
+        // contiguously starting at `buf`'s own start, whether this call
+        // returned success or a partial-page `ERROR_MORE_DATA`.
+        let mut ptr = buf.as_ptr();
+        for _ in 0..services_returned {
+            let record: EnumServiceStatusProcessW =
+                unsafe { core::ptr::read_unaligned(ptr.cast()) };
+            entries.push(ServiceStatusEntry {
+                // SAFETY: `record.service_name`/`record.display_name`
+                // point into `buf`, which is still alive for this whole
+                // loop body.
+                service_name: unsafe { decode_wide_cstr(record.service_name) },
+                display_name: unsafe { decode_wide_cstr(record.display_name) },
+                service_type: record.service_status_process.service_type,
+                current_state: record.service_status_process.current_state,
+                controls_accepted: record.service_status_process.controls_accepted,
+                win32_exit_code: record.service_status_process.win32_exit_code,
+                service_specific_exit_code: record
+                    .service_status_process
+                    .service_specific_exit_code,
+                check_point: record.service_status_process.check_point,
+                wait_hint: record.service_status_process.wait_hint,
+                process_id: record.service_status_process.process_id,
+                service_flags: record.service_status_process.service_flags,
+            });
+            ptr = unsafe { ptr.add(core::mem::size_of::<EnumServiceStatusProcessW>()) };
+        }
+
+        if ok != 0 {
+            // A successful return means the whole database has now been
+            // walked -- no more pages remain.
+            break;
+        }
+    }
+    Ok(entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +381,38 @@ mod tests {
         }
         .expect_err("OpenServiceW should fail for a nonexistent service name");
         assert_eq!(err, Win32Error::ERROR_SERVICE_DOES_NOT_EXIST);
+
+        // SAFETY: `scm` is still open (not yet closed).
+        unsafe { close(scm) }.expect("CloseServiceHandle should succeed on the SCM handle");
+    }
+
+    #[test]
+    fn enum_services_includes_the_well_known_event_log_service() {
+        let scm = open_manager(SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE).expect(
+            "OpenSCManagerW should succeed with SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE",
+        );
+
+        // SAFETY: `scm` is valid and open from the call just above.
+        let services = unsafe { enum_services(scm) }
+            .expect("EnumServicesStatusExW should succeed enumerating the local SCM database");
+        assert!(
+            !services.is_empty(),
+            "a real Windows machine should have at least one service"
+        );
+        assert!(
+            services
+                .iter()
+                .any(|s| s.service_name.eq_ignore_ascii_case("EventLog")),
+            "the well-known EventLog service should appear in the enumeration, got: {:?}",
+            services.iter().map(|s| &s.service_name).collect::<Vec<_>>()
+        );
+        // Every returned entry should have a real, nonempty display name
+        // -- confirming the pointer-into-buffer decoding actually worked,
+        // not just that the fixed-size fields happened to come through.
+        assert!(
+            services.iter().all(|s| !s.display_name.is_empty()),
+            "every enumerated service should have a nonempty display name"
+        );
 
         // SAFETY: `scm` is still open (not yet closed).
         unsafe { close(scm) }.expect("CloseServiceHandle should succeed on the SCM handle");
