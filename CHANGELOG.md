@@ -52,6 +52,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   absolute form — another parity-loop find.
 - `process::process_id_of` (`GetProcessId`), the reverse of `open_by_pid`'s
   pid-to-`HANDLE` mapping — another parity-loop find.
+- `process::image_path` (`QueryFullProcessImageNameW`), the full executable
+  path for a process handle, completing `list_processes`'s bare-filename-only
+  `exe_file` — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

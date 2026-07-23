@@ -101,6 +101,12 @@ unsafe extern "system" {
     fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> RawHandle;
     fn TerminateProcess(process: RawHandle, exit_code: u32) -> i32;
     fn GetProcessId(process: RawHandle) -> u32;
+    fn QueryFullProcessImageNameW(
+        process: RawHandle,
+        flags: u32,
+        exe_name: *mut u16,
+        size: *mut u32,
+    ) -> i32;
     fn GetProcessTimes(
         process: RawHandle,
         creation_time: *mut FileTime,
@@ -822,6 +828,48 @@ pub unsafe fn times(process: RawHandle) -> Result<ProcessTimes, Win32Error> {
     })
 }
 
+/// The full executable path for `process` — `QueryFullProcessImageNameW`,
+/// completing [`list_processes`]'s `ProcessEntry::exe_file` (issue #21,
+/// `PROCESSENTRY32W.szExeFile`), which is only ever a bare filename, not a
+/// full path. Like [`times`], `process` needs only
+/// [`PROCESS_QUERY_LIMITED_INFORMATION`].
+///
+/// Unlike this crate's other growing-buffer calls, `QueryFullProcessImageNameW`
+/// doesn't report the size actually required on a "buffer too small"
+/// failure (`lpdwSize` is documented as unchanged in that case) — so this
+/// doubles the buffer and retries rather than growing to an exact reported
+/// size, up to a generous cap matching Windows' own long-path maximum.
+///
+/// # Safety
+///
+/// `process` must be a currently-open, valid process handle.
+pub unsafe fn image_path(process: RawHandle) -> Result<alloc::string::String, Win32Error> {
+    const MAX_ATTEMPTS: u32 = 8;
+    let mut buf: Vec<u16> = alloc::vec![0u16; 260];
+    for _ in 0..MAX_ATTEMPTS {
+        let mut size = buf.len() as u32;
+        // SAFETY: `process` is caller-supplied per this function's own
+        // safety contract; `buf` is a valid, `buf.len()`-element writable
+        // buffer; `size` is a valid in/out pointer set to that same length;
+        // `flags = 0` requests the Win32 path format (not the NT native
+        // form), a documented valid input.
+        let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &mut size) };
+        if ok != 0 {
+            // On success, `size` is updated to the actual length written,
+            // excluding the terminating NUL.
+            return Ok(alloc::string::String::from_utf16_lossy(
+                &buf[..size as usize],
+            ));
+        }
+        let err = Win32Error::last();
+        if err != Win32Error::ERROR_INSUFFICIENT_BUFFER {
+            return Err(err);
+        }
+        buf.resize(buf.len() * 2, 0);
+    }
+    Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -945,6 +993,36 @@ mod tests {
         // SAFETY: `spawned.process` is a freshly created, valid handle.
         let pid = unsafe { process_id_of(spawned.process) }.expect("GetProcessId should succeed");
         assert_eq!(pid, spawned.process_id);
+
+        // SAFETY: `spawned.thread` is freshly created, valid, not yet
+        // resumed.
+        unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
+        // SAFETY: `spawned.process` is a valid, currently-open handle.
+        unsafe { wait(spawned.process, None) }.unwrap();
+
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+        }
+    }
+
+    #[test]
+    fn image_path_of_a_spawned_process_ends_with_its_own_exe_name() {
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known system binary.
+        let spawned = unsafe { spawn_suspended("cmd.exe /c exit 0", false, false, None) }
+            .expect("CreateProcessW should succeed");
+
+        // SAFETY: `spawned.process` is a freshly created, valid handle with
+        // full access rights (including PROCESS_QUERY_LIMITED_INFORMATION),
+        // since `CreateProcessW` itself opened it.
+        let path = unsafe { image_path(spawned.process) }
+            .expect("QueryFullProcessImageNameW should succeed");
+        assert!(
+            path.to_ascii_lowercase().ends_with("cmd.exe"),
+            "got: {path}"
+        );
 
         // SAFETY: `spawned.thread` is freshly created, valid, not yet
         // resumed.
