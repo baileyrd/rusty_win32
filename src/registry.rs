@@ -63,6 +63,7 @@ unsafe extern "system" {
         data: *const u8,
         data_size: u32,
     ) -> i32;
+    fn RegDeleteValueW(key: HKey, value_name: *const u16) -> i32;
 }
 
 /// `RegCreateKeyExW`'s `dwOptions`: an ordinary, disk-persisted key —
@@ -475,6 +476,30 @@ pub unsafe fn set_value(
     }
 }
 
+/// Remove one named value from `key` — `RegDeleteValueW`. Removes only
+/// the value itself, never the key it lives under or any of the key's
+/// other values/subkeys — the registry analog of deleting a single file
+/// out of a directory rather than the directory itself.
+///
+/// # Safety
+///
+/// `key` must be a currently-valid `HKey` — one of the predefined roots
+/// in this module, or a key [`open_key`]/[`create_key`] previously
+/// returned that hasn't been closed yet, opened/created with
+/// [`KEY_WRITE`] (or a superset of it, e.g. [`KEY_ALL_ACCESS`]) access.
+pub unsafe fn delete_value(key: HKey, name: &str) -> Result<(), crate::error::Win32Error> {
+    let wide_name: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+    // SAFETY: `key` is caller-supplied per this function's own safety
+    // contract; `wide_name` is a valid, NUL-terminated UTF-16 string live
+    // for the whole call.
+    let status = unsafe { RegDeleteValueW(key, wide_name.as_ptr()) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(crate::error::Win32Error::from_raw(status as u32))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,8 +711,65 @@ mod tests {
             let read_back = unsafe { query_value(key, name) }
                 .unwrap_or_else(|e| panic!("RegQueryValueExW should succeed for {name}: {e}"));
             assert_eq!(&read_back, value, "round trip mismatch for {name}");
+            // Clean up each value now that `delete_value` exists — this
+            // key still can't be removed itself (no `delete_key` yet),
+            // but there's no reason to leave its values behind too.
+            // SAFETY: same as above.
+            unsafe { delete_value(key, name) }
+                .unwrap_or_else(|e| panic!("RegDeleteValueW should succeed for {name}: {e}"));
         }
 
+        // SAFETY: `key` is still the same valid, currently-open handle.
+        unsafe { close_key(key) }.expect("RegCloseKey should succeed");
+    }
+
+    #[test]
+    fn delete_value_then_query_value_fails_for_the_removed_name() {
+        let subkey = format!(
+            "Software\\rusty_win32_registry_test_delete_value_{}",
+            std::process::id()
+        );
+        // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid root.
+        let (key, _disposition) =
+            unsafe { create_key(HKEY_CURRENT_USER, subkey.as_str(), KEY_ALL_ACCESS) }
+                .expect("RegCreateKeyExW should succeed");
+
+        // SAFETY: `key` was just created above and stays open for this
+        // whole test.
+        unsafe { set_value(key, "a_value", &RegistryValue::Dword(42)) }
+            .expect("RegSetValueExW should succeed");
+        // SAFETY: same as above.
+        unsafe { delete_value(key, "a_value") }.expect("RegDeleteValueW should succeed");
+        // SAFETY: same as above.
+        let err = unsafe { query_value(key, "a_value") }
+            .expect_err("RegQueryValueExW should fail for a value delete_value just removed");
+        assert_eq!(err, crate::error::Win32Error::ERROR_FILE_NOT_FOUND);
+
+        // SAFETY: `key` is still the same valid, currently-open handle.
+        unsafe { close_key(key) }.expect("RegCloseKey should succeed");
+    }
+
+    #[test]
+    fn delete_value_fails_for_a_nonexistent_value_name() {
+        // A key opened with `KEY_ALL_ACCESS` (not `KEY_READ`), unlike
+        // `query_value`'s/`open_key`'s equivalent tests against
+        // `HKEY_LOCAL_MACHINE` — `RegDeleteValueW` needs `KEY_SET_VALUE`
+        // access, and using a read-only handle here would leave it
+        // ambiguous whether a failure meant "access denied" or "value not
+        // found," rather than cleanly isolating the latter.
+        let subkey = format!(
+            "Software\\rusty_win32_registry_test_delete_value_missing_{}",
+            std::process::id()
+        );
+        // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid root.
+        let (key, _disposition) =
+            unsafe { create_key(HKEY_CURRENT_USER, subkey.as_str(), KEY_ALL_ACCESS) }
+                .expect("RegCreateKeyExW should succeed");
+        // SAFETY: `key` was just created above and stays open for this
+        // whole call.
+        let err = unsafe { delete_value(key, "ThisValueNameDefinitelyDoesNotExist12345") }
+            .expect_err("RegDeleteValueW should fail for a nonexistent value name");
+        assert_eq!(err, crate::error::Win32Error::ERROR_FILE_NOT_FOUND);
         // SAFETY: `key` is still the same valid, currently-open handle.
         unsafe { close_key(key) }.expect("RegCloseKey should succeed");
     }

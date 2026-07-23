@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `registry::delete_value` (`RegDeleteValueW`) — remove one named value
+  under an open key, without touching the key itself or its other
+  values/subkeys.
 - `registry::set_value` (`RegSetValueExW`), the write-side counterpart to
   `query_value` — encodes a `RegistryValue` back into the `dwType`/
   byte-buffer shape each `REG_*` type expects.
