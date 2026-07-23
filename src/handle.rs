@@ -3,12 +3,12 @@
 //! needs to close its fd-3-and-up gap (see rush's
 //! `docs/WINDOWS_BACKEND_ANALYSIS.md` §4.2). Windows has no kernel-level
 //! small-integer fd table the way Unix does — only the three std-handle
-//! slots this crate's [`crate::console`] sibling doesn't touch and
-//! `winstdio` (in rush itself) already owns. This module provides the raw
-//! handle primitives; a rush-owned integer-to-`HANDLE` map to give fd 3+ and
-//! `{name}>` varfd redirects any meaning is a follow-up in rush itself, not
-//! this crate (see the analysis doc's §4.2 for why that split is
-//! deliberate).
+//! slots [`get_std_handle`]/[`set_std_handle`] read and swap, which this
+//! crate's [`crate::console`] sibling doesn't otherwise touch. This module
+//! provides the raw handle primitives; a rush-owned integer-to-`HANDLE` map
+//! to give fd 3+ and `{name}>` varfd redirects any meaning is a follow-up in
+//! rush itself, not this crate (see the analysis doc's §4.2 for why that
+//! split is deliberate).
 //!
 //! A Windows `HANDLE` is non-inheritable by default — the inverse of Unix's
 //! `CLOEXEC`-by-default-absent convention, where a descriptor is inherited
@@ -56,7 +56,25 @@ unsafe extern "system" {
         total_bytes_avail: *mut u32,
         bytes_left_this_message: *mut u32,
     ) -> i32;
+    fn GetStdHandle(std_handle: u32) -> RawHandle;
+    fn SetStdHandle(std_handle: u32, handle: RawHandle) -> i32;
 }
+
+/// `GetStdHandle`/`SetStdHandle`'s `nStdHandle` slot selector for the
+/// process's standard input. Defined as `(DWORD)-10` — a negative index
+/// cast to an unsigned parameter type, not a real handle table offset.
+pub const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6;
+/// `GetStdHandle`/`SetStdHandle`'s `nStdHandle` slot selector for the
+/// process's standard output. Defined as `(DWORD)-11`.
+pub const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5;
+/// `GetStdHandle`/`SetStdHandle`'s `nStdHandle` slot selector for the
+/// process's standard error. Defined as `(DWORD)-12`.
+pub const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4;
+
+/// `GetStdHandle`'s own sentinel for "this call itself failed" — distinct
+/// from a `NULL` return, which means the slot has no handle assigned rather
+/// than that the call failed.
+const INVALID_HANDLE_VALUE: isize = -1;
 
 /// Create an anonymous pipe, returning `(read_handle, write_handle)`.
 /// Neither end is inheritable by a spawned child yet — pass whichever end a
@@ -200,6 +218,52 @@ pub unsafe fn pipe_bytes_available(pipe_read_handle: RawHandle) -> Result<u32, W
     }
 }
 
+/// Read one of the calling process's standard handle slots (`slot`: one of
+/// [`STD_INPUT_HANDLE`]/[`STD_OUTPUT_HANDLE`]/[`STD_ERROR_HANDLE`]) —
+/// `GetStdHandle`, the primitive `spawn_suspended`'s own doc comment
+/// describes redirection as built on ("swapping the parent's std-handle
+/// slots before spawning"). `Ok(None)` means the slot has no handle
+/// assigned (`GetStdHandle`'s documented `NULL`-without-`GetLastError`-
+/// failure outcome, e.g. a GUI process with no console), distinct from
+/// `Err`, which means the call itself failed
+/// (`INVALID_HANDLE_VALUE`).
+pub fn get_std_handle(slot: u32) -> Result<Option<RawHandle>, Win32Error> {
+    // SAFETY: `slot` is a plain `DWORD` selector, not a pointer; any `u32`
+    // value is a valid (if possibly unrecognized) argument to
+    // `GetStdHandle`.
+    let handle = unsafe { GetStdHandle(slot) };
+    if handle as isize == INVALID_HANDLE_VALUE {
+        Err(Win32Error::last())
+    } else if handle.is_null() {
+        Ok(None)
+    } else {
+        Ok(Some(handle))
+    }
+}
+
+/// Replace one of the calling process's standard handle slots — `SetStdHandle`,
+/// the other half of the "swap the parent's std-handle slots before
+/// spawning" redirection model [`get_std_handle`]'s own doc references.
+/// Affects only this process's own view (and anything a subsequent
+/// `CreateProcessW`-style spawn inherits from it); it does not duplicate or
+/// close the handle previously in that slot.
+///
+/// # Safety
+///
+/// `handle` must be a currently-open, valid handle (or a documented pseudo-
+/// handle) that outlives its use as a standard handle — this call does not
+/// take ownership of it, matching `SetStdHandle`'s own documented contract.
+pub unsafe fn set_std_handle(slot: u32, handle: RawHandle) -> Result<(), Win32Error> {
+    // SAFETY: `slot` is a plain `DWORD` selector; `handle` is caller-supplied
+    // per this function's own safety contract.
+    let ok = unsafe { SetStdHandle(slot, handle) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +394,36 @@ mod tests {
             got, "rusty_win32",
             "peeking must not have consumed any bytes"
         );
+    }
+
+    #[test]
+    fn get_std_handle_succeeds_for_every_standard_slot() {
+        for slot in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            get_std_handle(slot).expect("GetStdHandle should succeed for a well-known slot");
+        }
+    }
+
+    #[test]
+    fn set_std_handle_then_get_std_handle_round_trips() {
+        let original = get_std_handle(STD_INPUT_HANDLE).expect("GetStdHandle should succeed");
+        let (read_end, write_end) = create_pipe().expect("CreatePipe should succeed");
+
+        // SAFETY: `read_end` is a just-created, valid handle that outlives
+        // its use as the standard-input slot for the duration of this test.
+        unsafe { set_std_handle(STD_INPUT_HANDLE, read_end) }.expect("SetStdHandle should succeed");
+        let swapped = get_std_handle(STD_INPUT_HANDLE).expect("GetStdHandle should succeed");
+        assert_eq!(swapped, Some(read_end));
+
+        // SAFETY: `original` (if any) is the process's own handle from
+        // before this test began, or NULL to restore "no handle assigned" —
+        // either way a safe value to hand back to `SetStdHandle`.
+        unsafe { set_std_handle(STD_INPUT_HANDLE, original.unwrap_or(core::ptr::null_mut())) }
+            .expect("SetStdHandle should succeed restoring the original handle");
+
+        // SAFETY: both pipe ends are still open and not used again.
+        unsafe {
+            let _ = close(read_end);
+            let _ = close(write_end);
+        }
     }
 }
