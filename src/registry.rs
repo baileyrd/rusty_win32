@@ -64,7 +64,19 @@ unsafe extern "system" {
         data_size: u32,
     ) -> i32;
     fn RegDeleteValueW(key: HKey, value_name: *const u16) -> i32;
+    fn RegDeleteKeyExW(key: HKey, sub_key: *const u16, sam_desired: u32, reserved: u32) -> i32;
 }
+
+/// `RegDeleteKeyExW`'s `samDesired` — on WOW64, a 32-bit process's
+/// ordinary view of `HKEY_LOCAL_MACHINE\Software` is silently redirected
+/// to a separate `WOW6432Node` subtree; these bits force targeting the
+/// real 64-bit view or the redirected 32-bit view explicitly instead of
+/// leaving it to whichever view the calling process happens to run as.
+/// `0` (this crate's 64-bit-only target never actually runs under WOW64,
+/// so this is mostly for API completeness) leaves it at the default.
+/// Verified against mingw-w64's own `winnt.h` macros.
+pub const KEY_WOW64_64KEY: u32 = 0x0100;
+pub const KEY_WOW64_32KEY: u32 = 0x0200;
 
 /// `RegCreateKeyExW`'s `dwOptions`: an ordinary, disk-persisted key —
 /// this crate's only supported option (`REG_OPTION_VOLATILE`/
@@ -500,6 +512,36 @@ pub unsafe fn delete_value(key: HKey, name: &str) -> Result<(), crate::error::Wi
     }
 }
 
+/// Remove a leaf subkey of `parent` — `RegDeleteKeyExW`. The subkey must
+/// have no subkeys of its own (its values, if any, are removed along
+/// with it) — Windows refuses to delete a key that still has children,
+/// the same restriction `rmdir` has for a non-empty directory; delete the
+/// deepest subkeys first for a whole subtree. `view` is a `KEY_WOW64_*`
+/// bit (or `0` for the default view) — see [`KEY_WOW64_64KEY`]/
+/// [`KEY_WOW64_32KEY`].
+///
+/// # Safety
+///
+/// `parent` must be a currently-valid `HKey` — one of the predefined
+/// roots in this module, or a key [`open_key`]/[`create_key`] previously
+/// returned that hasn't been closed yet.
+pub unsafe fn delete_key(
+    parent: HKey,
+    subkey: &str,
+    view: u32,
+) -> Result<(), crate::error::Win32Error> {
+    let wide: Vec<u16> = subkey.encode_utf16().chain(core::iter::once(0)).collect();
+    // SAFETY: `parent` is caller-supplied per this function's own safety
+    // contract; `wide` is a valid, NUL-terminated UTF-16 string live for
+    // the whole call.
+    let status = unsafe { RegDeleteKeyExW(parent, wide.as_ptr(), view, 0) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(crate::error::Win32Error::from_raw(status as u32))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,6 +648,13 @@ mod tests {
         assert_eq!(second_disposition, KeyDisposition::OpenedExistingKey);
         // SAFETY: `second` was just opened above and not yet closed.
         unsafe { close_key(second) }.expect("RegCloseKey should succeed");
+
+        // Clean up now that `delete_key` exists — this test's own subkey
+        // is a bare leaf (no subkeys of its own), so it's directly
+        // deletable.
+        // SAFETY: `HKEY_CURRENT_USER` is the same predefined root.
+        unsafe { delete_key(HKEY_CURRENT_USER, subkey, 0) }
+            .expect("RegDeleteKeyExW should succeed");
     }
 
     /// Every value read below lives under this exact, well-documented
@@ -668,8 +717,10 @@ mod tests {
     fn set_value_then_query_value_round_trips_every_variant() {
         // Uniquified by this test process's own pid for the same reason
         // `create_key`'s own test is: this crate's CI job runs `cargo
-        // test` twice on the same Windows VM, with no `delete_key` yet to
-        // clean this up in between.
+        // test` twice on the same Windows VM, and while `delete_key`
+        // below does clean the key back up, uniquifying is cheap
+        // insurance against any run that ends before cleanup runs (e.g. a
+        // panic partway through).
         let subkey = format!(
             "Software\\rusty_win32_registry_test_set_value_{}",
             std::process::id()
@@ -721,6 +772,11 @@ mod tests {
 
         // SAFETY: `key` is still the same valid, currently-open handle.
         unsafe { close_key(key) }.expect("RegCloseKey should succeed");
+        // SAFETY: `HKEY_CURRENT_USER` is the same predefined root; the
+        // subkey is now empty of values (the loop above deleted each one)
+        // and has no subkeys of its own.
+        unsafe { delete_key(HKEY_CURRENT_USER, subkey.as_str(), 0) }
+            .expect("RegDeleteKeyExW should succeed");
     }
 
     #[test]
@@ -747,6 +803,9 @@ mod tests {
 
         // SAFETY: `key` is still the same valid, currently-open handle.
         unsafe { close_key(key) }.expect("RegCloseKey should succeed");
+        // SAFETY: `HKEY_CURRENT_USER` is the same predefined root.
+        unsafe { delete_key(HKEY_CURRENT_USER, subkey.as_str(), 0) }
+            .expect("RegDeleteKeyExW should succeed");
     }
 
     #[test]
@@ -772,5 +831,47 @@ mod tests {
         assert_eq!(err, crate::error::Win32Error::ERROR_FILE_NOT_FOUND);
         // SAFETY: `key` is still the same valid, currently-open handle.
         unsafe { close_key(key) }.expect("RegCloseKey should succeed");
+        // SAFETY: `HKEY_CURRENT_USER` is the same predefined root.
+        unsafe { delete_key(HKEY_CURRENT_USER, subkey.as_str(), 0) }
+            .expect("RegDeleteKeyExW should succeed");
+    }
+
+    #[test]
+    fn delete_key_removes_a_leaf_subkey() {
+        let subkey = format!(
+            "Software\\rusty_win32_registry_test_delete_key_{}",
+            std::process::id()
+        );
+        // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid root.
+        let (key, _disposition) =
+            unsafe { create_key(HKEY_CURRENT_USER, subkey.as_str(), KEY_ALL_ACCESS) }
+                .expect("RegCreateKeyExW should succeed");
+        // SAFETY: `key` was just created above and not yet closed.
+        unsafe { close_key(key) }.expect("RegCloseKey should succeed");
+
+        // SAFETY: `HKEY_CURRENT_USER` is the same predefined root; the
+        // subkey created above is a bare leaf with no subkeys of its own.
+        unsafe { delete_key(HKEY_CURRENT_USER, subkey.as_str(), 0) }
+            .expect("RegDeleteKeyExW should succeed");
+
+        // SAFETY: same predefined root; confirming the deletion actually
+        // took effect.
+        let err = unsafe { open_key(HKEY_CURRENT_USER, subkey.as_str(), KEY_READ) }
+            .expect_err("RegOpenKeyExW should fail: delete_key just removed this subkey");
+        assert_eq!(err, crate::error::Win32Error::ERROR_FILE_NOT_FOUND);
+    }
+
+    #[test]
+    fn delete_key_fails_for_a_nonexistent_subkey() {
+        // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid root.
+        let err = unsafe {
+            delete_key(
+                HKEY_CURRENT_USER,
+                "Software\\ThisSubkeyDefinitelyDoesNotExist12345",
+                0,
+            )
+        }
+        .expect_err("RegDeleteKeyExW should fail for a nonexistent subkey");
+        assert_eq!(err, crate::error::Win32Error::ERROR_FILE_NOT_FOUND);
     }
 }
