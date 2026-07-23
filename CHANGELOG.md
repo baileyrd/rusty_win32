@@ -5,6 +5,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `security::build_acl` (`SetEntriesInAclW`) plus `ExplicitAccess`/
+  `Trustee`/`AccessMode`/`TrusteeForm`/`TrusteeType` (real, fully-fielded
+  FFI mirrors — unlike `Acl`/`PSID`, these are genuinely fixed-size) and
+  `BuiltAcl` (freeing via `LocalFree` on `Drop`) — build a new ACL from
+  an existing one plus add/replace/remove entries, the primitive behind
+  `icacls /grant`/`/deny`.
 - `security::acl_entries` (`GetAclInformation` + `GetAce`) plus
   `AclEntry`/`AceKind` and a fixed-header-only `Acl` mirror — enumerate a
   DACL/SACL's ACEs one at a time, turning an opaque ACL into the
