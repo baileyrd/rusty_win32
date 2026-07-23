@@ -1135,11 +1135,19 @@ mod tests {
     }
 
     #[test]
-    fn window_handle_returns_a_non_null_handle_once_a_console_exists() {
+    fn window_handle_is_stable_across_repeated_calls() {
         let _ = ensure_console_stdin(); // guarantee a console exists first
-        assert!(
-            window_handle().is_some(),
-            "GetConsoleWindow should report a real HWND once this process has a console"
+        // `GetConsoleWindow` can validly return `NULL` even once a console
+        // exists — not every hosting scenario (e.g. a non-interactive CI
+        // runner's session) attaches a real window to it, confirmed by
+        // this exact assumption failing on this crate's own
+        // `windows-latest` CI runner. So this only checks that repeated
+        // calls agree with each other, not that the handle is non-null.
+        let first = window_handle();
+        let second = window_handle();
+        assert_eq!(
+            first, second,
+            "GetConsoleWindow should report the same answer on repeated calls"
         );
     }
 

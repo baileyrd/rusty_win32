@@ -16,6 +16,13 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
   crate's scope beyond returning the handle. Another round-2 "weak/no
   clear consumer" item (`gap-analysis.md`); no current `rush` feature
   asks for this.
+- **Fixed:** a genuine (not flaky) test assumption caught by CI: the
+  original test asserted `GetConsoleWindow` always returns a real `HWND`
+  once a console exists, but this crate's own `windows-latest` CI runner
+  is itself a real, deterministic counterexample — a console can exist
+  and work fine for I/O with no window attached (e.g. a non-interactive
+  CI session). Rewrote the test to check repeated-call consistency
+  instead of asserting `Some`.
 
 ## PR #209 — console: add process_list (GetConsoleProcessList)
 **2026-07-23** · [#209](https://github.com/baileyrd/rusty_win32/pull/209)
