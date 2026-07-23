@@ -5,6 +5,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `security::build_trustee_with_sid`/`security::build_trustee_with_name`
+  (`BuildTrusteeWithSidW`/`BuildTrusteeWithNameW`) — wrap a `PSID` or a
+  wide-string name into the `Trustee` shape `build_acl`'s entries need.
+  Supersedes the crate-internal `Trustee::from_sid` helper added
+  alongside `build_acl` (removed now that the real Win32 primitive
+  covers the same ground).
 - `security::build_acl` (`SetEntriesInAclW`) plus `ExplicitAccess`/
   `Trustee`/`AccessMode`/`TrusteeForm`/`TrusteeType` (real, fully-fielded
   FFI mirrors — unlike `Acl`/`PSID`, these are genuinely fixed-size) and

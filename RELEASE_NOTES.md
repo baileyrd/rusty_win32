@@ -6,6 +6,32 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #228 — security: add build_trustee_with_sid/build_trustee_with_name
+**2026-07-23** · [#228](https://github.com/baileyrd/rusty_win32/pull/228)
+
+- **Added:** `security::build_trustee_with_sid`/
+  `security::build_trustee_with_name` (`BuildTrusteeWithSidW`/
+  `BuildTrusteeWithNameW`), closing issue #157 — wrap a `PSID` or a
+  wide-string name into the `Trustee` shape `build_acl`'s entries need.
+  `build_trustee_with_name` takes an already-built, NUL-terminated
+  `&mut [u16]` rather than `&str` (diverging from this issue's literal
+  signature): `BuildTrusteeWithNameW` doesn't copy the name, it stores
+  the pointer it's given directly, so an internally-built temporary
+  `Vec<u16>` would leave the result dangling the moment the function
+  returned — the caller must own a buffer that actually outlives the
+  `Trustee`.
+- **Changed:** `Trustee`'s `trustee_form`/`trustee_type`/`name` fields
+  are now public (an ordinary FFI-mirror struct, matching
+  `ExplicitAccess`'s already-public fields) — needed so a caller can
+  adjust `trustee_type` after `build_trustee_with_sid` (which always
+  reports `TRUSTEE_IS_UNKNOWN` itself, never inspecting the SID to guess
+  a more specific type).
+- **Removed:** `Trustee::from_sid`, the crate-internal placeholder
+  constructor added alongside `build_acl` (PR #227) before this issue's
+  real `BuildTrusteeWithSidW` wrapper existed — superseded now that the
+  real primitive covers the same ground; its one caller (`build_acl`'s
+  own test) now uses `build_trustee_with_sid` instead.
+
 ## PR #227 — security: add build_acl
 **2026-07-23** · [#227](https://github.com/baileyrd/rusty_win32/pull/227)
 
