@@ -6,6 +6,20 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #90 — handle: add get_std_handle/set_std_handle (GetStdHandle/SetStdHandle)
+**2026-07-23** · [#90](https://github.com/baileyrd/rusty_win32/pull/90)
+
+- **Added:** `handle::get_std_handle`/`handle::set_std_handle`
+  (`GetStdHandle`/`SetStdHandle`) plus the `STD_INPUT_HANDLE`/
+  `STD_OUTPUT_HANDLE`/`STD_ERROR_HANDLE` slot constants, closing issue #57
+  from the parity-loop sweep. `process.rs`'s own `spawn_suspended` doc
+  comment already described redirection as "swapping the parent's
+  std-handle slots before spawning, matching `winstdio`'s existing model in
+  rush" — this crate previously assumed that primitive without owning it.
+  `get_std_handle` returns `Ok(None)` (not `Err`) for `GetStdHandle`'s
+  documented "no handle assigned" `NULL` outcome, distinct from an actual
+  call failure (`INVALID_HANDLE_VALUE`).
+
 ## PR #89 — process: add get_env_var/set_env_var (GetEnvironmentVariableW/SetEnvironmentVariableW)
 **2026-07-23** · [#89](https://github.com/baileyrd/rusty_win32/pull/89)
 

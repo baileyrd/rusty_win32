@@ -44,6 +44,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   (`GetEnvironmentVariableW`/`SetEnvironmentVariableW`), live single-variable
   environment access to back `export`/`unset`/single-`$VAR` reads — another
   parity-loop find.
+- `handle::get_std_handle`/`handle::set_std_handle`
+  (`GetStdHandle`/`SetStdHandle`) plus the `STD_*_HANDLE` slot constants —
+  the primitive `process.rs`'s own `spawn_suspended` doc comment already
+  described but this crate didn't yet own; another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
