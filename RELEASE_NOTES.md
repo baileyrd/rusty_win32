@@ -6,6 +6,19 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #97 — console: add fill_char/fill_attribute (FillConsoleOutputCharacterW/FillConsoleOutputAttribute)
+**2026-07-23** · [#97](https://github.com/baileyrd/rusty_win32/pull/97)
+
+- **Added:** `console::fill_char`/`console::fill_attribute`
+  (`FillConsoleOutputCharacterW`/`FillConsoleOutputAttribute`), closing
+  issue #64 from the parity-loop sweep. A common line-editor primitive:
+  erasing stale characters (and their color/attribute bits) after a
+  shorter re-render, e.g. when a redrawn prompt line is shorter than what
+  it's replacing — the role a VT `\x1b[K` escape plays for a caller that
+  assumes that path, which this crate doesn't assume for every consumer.
+  Both return the number of cells actually written, which is less than the
+  requested count if the write runs past the end of the screen buffer.
+
 ## PR #96 — console: add set_cursor_position (SetConsoleCursorPosition)
 **2026-07-23** · [#96](https://github.com/baileyrd/rusty_win32/pull/96)
 
