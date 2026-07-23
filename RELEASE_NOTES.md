@@ -6,6 +6,18 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #96 — console: add set_cursor_position (SetConsoleCursorPosition)
+**2026-07-23** · [#96](https://github.com/baileyrd/rusty_win32/pull/96)
+
+- **Added:** `console::set_cursor_position` (`SetConsoleCursorPosition`),
+  closing issue #63 from the parity-loop sweep. `console.rs` previously only
+  *read* cursor position via `window_size`'s underlying
+  `GetConsoleScreenBufferInfo` call; a raw-mode line editor (`rusty_lines`)
+  doing multi-line prompt redraws needs to reposition the cursor directly,
+  with no VT-escape-sequence fallback assumed anywhere else in this crate.
+  Reuses the existing private `Coord` struct shape already modeled for
+  `window_size`.
+
 ## PR #95 — console: add title/set_title (GetConsoleTitleW/SetConsoleTitleW)
 **2026-07-23** · [#95](https://github.com/baileyrd/rusty_win32/pull/95)
 
