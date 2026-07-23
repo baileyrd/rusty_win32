@@ -169,6 +169,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `pipe::transact`/`pipe::call` (`TransactNamedPipe`/`CallNamedPipeW`),
   one-shot message-mode pipe transactions for a simple request-response
   protocol — another round-2 item.
+- `job::open_by_name` (`OpenJobObjectW`) plus `JOB_OBJECT_ALL_ACCESS`, the
+  reverse direction of `job::create`, which only ever makes anonymous
+  jobs — another round-2 item.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

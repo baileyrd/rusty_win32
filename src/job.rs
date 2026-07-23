@@ -250,6 +250,7 @@ const _: () = assert!(core::mem::align_of::<JobObjectAssociateCompletionPort>() 
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn CreateJobObjectW(job_attributes: *const core::ffi::c_void, name: *const u16) -> RawHandle;
+    fn OpenJobObjectW(desired_access: u32, inherit_handle: i32, name: *const u16) -> RawHandle;
     fn AssignProcessToJobObject(job: RawHandle, process: RawHandle) -> i32;
     fn IsProcessInJob(process: RawHandle, job: RawHandle, result: *mut i32) -> i32;
     fn TerminateJobObject(job: RawHandle, exit_code: u32) -> i32;
@@ -290,6 +291,28 @@ pub fn create() -> Result<RawHandle, Win32Error> {
     // SAFETY: both arguments are documented-valid NULLs (default security
     // attributes, anonymous/unnamed job).
     let job = unsafe { CreateJobObjectW(core::ptr::null(), core::ptr::null()) };
+    if job.is_null() {
+        Err(Win32Error::last())
+    } else {
+        Ok(job)
+    }
+}
+
+/// `OpenJobObjectW`'s/every other Job Object call's full-access-rights
+/// bitmask (`STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x3F`) — matching
+/// [`create`]'s own implicit, always-full-access grant, so a caller that
+/// doesn't need to think about individual `JOB_OBJECT_*` bits can just use
+/// this.
+pub const JOB_OBJECT_ALL_ACCESS: u32 = 0x001F_003F;
+
+/// Open a named Job Object by name — `OpenJobObjectW`, the reverse
+/// direction of [`create`], which only ever makes anonymous jobs. No
+/// current `rush` feature asks for this; filed for Win32 parity.
+pub fn open_by_name(name: &str, desired_access: u32) -> Result<RawHandle, Win32Error> {
+    let wide: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+    // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string;
+    // `inherit_handle = 0` (not inheritable) is a documented valid input.
+    let job = unsafe { OpenJobObjectW(desired_access, 0, wide.as_ptr()) };
     if job.is_null() {
         Err(Win32Error::last())
     } else {
@@ -1110,6 +1133,40 @@ mod tests {
             crate::handle::close(spawned.process).unwrap();
             crate::handle::close(spawned.thread).unwrap();
             crate::handle::close(job).unwrap();
+        }
+    }
+
+    #[test]
+    fn open_by_name_opens_the_same_job_a_named_create_made() {
+        let name = "rusty_win32_test_job_open_by_name";
+        let wide: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+        // `create()` only ever makes anonymous jobs — call the private
+        // `CreateJobObjectW` extern directly (this test module can, being
+        // inside `job.rs` itself) to get a *named* job to open by name.
+        // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string;
+        // `job_attributes = NULL` requests default security attributes, a
+        // documented valid input.
+        let original = unsafe { CreateJobObjectW(core::ptr::null(), wide.as_ptr()) };
+        assert!(
+            !original.is_null(),
+            "CreateJobObjectW should succeed creating a named job"
+        );
+
+        let opened = open_by_name(name, JOB_OBJECT_ALL_ACCESS)
+            .expect("OpenJobObjectW should succeed for a job this test itself just created");
+
+        // SAFETY: both handles are valid, currently-open handles.
+        let same = unsafe { crate::handle::same_object(original, opened) }
+            .expect("CompareObjectHandles should succeed");
+        assert!(
+            same,
+            "open_by_name should return a handle to the same job object CreateJobObjectW made"
+        );
+
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(original).unwrap();
+            crate::handle::close(opened).unwrap();
         }
     }
 }
