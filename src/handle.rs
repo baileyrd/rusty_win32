@@ -80,6 +80,12 @@ unsafe extern "system" {
         milliseconds: u32,
         alertable: i32,
     ) -> u32;
+    fn SignalObjectAndWait(
+        object_to_signal: RawHandle,
+        object_to_wait_on: RawHandle,
+        milliseconds: u32,
+        alertable: i32,
+    ) -> u32;
 }
 
 /// `INFINITE` — `WaitForSingleObjectEx`/`WaitForMultipleObjectsEx`'s
@@ -529,6 +535,46 @@ pub unsafe fn wait_multiple_ex(
     }
 }
 
+/// Atomically signal `to_signal` and wait on `to_wait_on` —
+/// `SignalObjectAndWait`, avoiding the race a caller would otherwise
+/// accept by making two separate calls (a signal on one object followed
+/// by a separate wait on another leaves a window where another thread
+/// could act between them). `to_signal` must be a mutex, semaphore, or
+/// event — the same object kinds [`release_mutex`]/[`release_semaphore`]/
+/// a manual-or-auto-reset event accept. `alertable` is the same APC-wakeup
+/// opt-in as [`wait_single_ex`]. No current `rush` feature asks for this;
+/// filed for Win32 parity.
+///
+/// # Safety
+///
+/// `to_signal` and `to_wait_on` must each be a currently-open, valid
+/// handle of a kind `SignalObjectAndWait` accepts.
+pub unsafe fn signal_and_wait(
+    to_signal: RawHandle,
+    to_wait_on: RawHandle,
+    timeout_ms: Option<u32>,
+    alertable: bool,
+) -> Result<WaitResult, Win32Error> {
+    // SAFETY: both handles are caller-supplied per this function's own
+    // safety contract; the remaining parameters are plain values, not
+    // pointers.
+    let result = unsafe {
+        SignalObjectAndWait(
+            to_signal,
+            to_wait_on,
+            timeout_ms.unwrap_or(INFINITE),
+            i32::from(alertable),
+        )
+    };
+    match result {
+        WAIT_OBJECT_0 => Ok(WaitResult::Signaled(0)),
+        WAIT_ABANDONED_0 => Ok(WaitResult::Abandoned(0)),
+        WAIT_TIMEOUT => Ok(WaitResult::TimedOut),
+        WAIT_IO_COMPLETION => Ok(WaitResult::IoCompletion),
+        _ => Err(Win32Error::last()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -838,6 +884,45 @@ mod tests {
         unsafe {
             close(first).unwrap();
             close(second).unwrap();
+        }
+    }
+
+    #[test]
+    fn signal_and_wait_signals_one_semaphore_and_acquires_another() {
+        let to_signal = create_semaphore(None, 0, 1).expect("CreateSemaphoreW should succeed");
+        let to_wait_on = create_semaphore(None, 1, 1).expect("CreateSemaphoreW should succeed");
+
+        // SAFETY: both handles are freshly created and valid; `to_signal`
+        // is a semaphore (a valid `SignalObjectAndWait` signal-object
+        // kind), `to_wait_on` currently has a non-zero count.
+        let result = unsafe { signal_and_wait(to_signal, to_wait_on, Some(0), false) }
+            .expect("SignalObjectAndWait should succeed");
+        assert_eq!(result, WaitResult::Signaled(0));
+
+        // `to_signal`'s count should now be 1 (released by the call above).
+        // SAFETY: `to_signal` is still a valid, currently-open handle.
+        let signaled_result = unsafe { wait_single_ex(to_signal, Some(0), false) }
+            .expect("WaitForSingleObjectEx should succeed");
+        assert_eq!(
+            signaled_result,
+            WaitResult::Signaled(0),
+            "to_signal should have been released to a non-zero count"
+        );
+
+        // `to_wait_on`'s count should now be 0 (acquired by the call above).
+        // SAFETY: `to_wait_on` is still a valid, currently-open handle.
+        let drained_result = unsafe { wait_single_ex(to_wait_on, Some(0), false) }
+            .expect("WaitForSingleObjectEx should succeed (report a timeout, not fail)");
+        assert_eq!(
+            drained_result,
+            WaitResult::TimedOut,
+            "to_wait_on should have been drained to 0 by the wait side of the call"
+        );
+
+        // SAFETY: both handles are still valid, each closed exactly once.
+        unsafe {
+            close(to_signal).unwrap();
+            close(to_wait_on).unwrap();
         }
     }
 }
