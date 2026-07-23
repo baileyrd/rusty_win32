@@ -6,6 +6,25 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #45 — process/console: new-process-group spawn + targeted Ctrl-Break delivery
+**2026-07-23** · [#45](https://github.com/baileyrd/rusty_win32/pull/45)
+
+- **Added:** `process::spawn_suspended`'s `new_process_group` parameter
+  (`CREATE_NEW_PROCESS_GROUP`) and `console::generate_ctrl_event`
+  (`GenerateConsoleCtrlEvent`) — closes the round-2 capability assessment's
+  top-ranked gap: nothing previously let a caller interrupt one child
+  without hitting every process attached to the console at once.
+- `CTRL_C_EVENT` can only ever be broadcast console-wide by Windows' own
+  design (documented and tested: a nonzero process-group id fails with
+  `ERROR_INVALID_PARAMETER`); targeting one child's group needs
+  `CTRL_BREAK_EVENT` instead.
+- **Changed:** `spawn_suspended`'s signature (new `new_process_group: bool`
+  parameter) — a breaking change, acceptable pre-1.0.
+- Note: several PRs (#22–#35) shipped between this entry and PR #9 below
+  without a `RELEASE_NOTES.md` entry each — a backlog gap, not something
+  this entry backfills; see `docs/CAPABILITY_ASSESSMENT.md` for that work's
+  own record instead.
+
 ## PR #9 — process: add wait_any, a WaitForMultipleObjects(bWaitAll=FALSE) wrapper
 **2026-07-18** · [#9](https://github.com/baileyrd/rusty_win32/pull/9)
 
