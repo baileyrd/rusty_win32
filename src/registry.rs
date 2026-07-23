@@ -100,6 +100,7 @@ unsafe extern "system" {
         class_len: *mut u32,
         last_write_time: *mut FileTime,
     ) -> i32;
+    fn RegFlushKey(key: HKey) -> i32;
 }
 
 // FILETIME: `size_of` 8, `align_of` 4 on x86_64 — mirrors `time.rs`'s
@@ -955,6 +956,34 @@ pub unsafe fn key_info(key: HKey) -> Result<KeyInfo, crate::error::Win32Error> {
     })
 }
 
+/// Force `key`'s changes to disk immediately — `RegFlushKey`, documented
+/// as the registry analog of `FlushFileBuffers` (which this crate
+/// doesn't itself wrap — no current consumer needs a raw-file-handle
+/// flush, unlike this registry-durability gap). Windows normally batches
+/// registry writes and flushes them lazily; this closes
+/// the durability gap for a caller writing settings right before a risky
+/// operation (e.g. right before terminating the process), where waiting
+/// for the lazy flush would risk losing the write entirely. Expensive —
+/// this crate's own docs match Microsoft's own guidance not to call it
+/// except when durability genuinely matters, never as routine practice
+/// after every write.
+///
+/// # Safety
+///
+/// `key` must be a currently-valid `HKey` — one of the predefined roots
+/// in this module, or a key [`open_key`]/[`create_key`] previously
+/// returned that hasn't been closed yet.
+pub unsafe fn flush_key(key: HKey) -> Result<(), crate::error::Win32Error> {
+    // SAFETY: `key` is caller-supplied per this function's own safety
+    // contract.
+    let status = unsafe { RegFlushKey(key) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(crate::error::Win32Error::from_raw(status as u32))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1521,6 +1550,33 @@ mod tests {
         assert_eq!(info.value_count, 0);
 
         // SAFETY: `key` is still the same valid, currently-open handle.
+        unsafe { close_key(key) }.expect("RegCloseKey should succeed");
+        // SAFETY: `HKEY_CURRENT_USER` is the same predefined root.
+        unsafe { delete_key(HKEY_CURRENT_USER, subkey.as_str(), 0) }
+            .expect("RegDeleteKeyExW should succeed");
+    }
+
+    #[test]
+    fn flush_key_succeeds_after_a_write() {
+        let subkey = format!(
+            "Software\\rusty_win32_registry_test_flush_key_{}",
+            std::process::id()
+        );
+        // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid root.
+        let (key, _disposition) =
+            unsafe { create_key(HKEY_CURRENT_USER, subkey.as_str(), KEY_ALL_ACCESS) }
+                .expect("RegCreateKeyExW should succeed");
+
+        // SAFETY: `key` was just created above, opened with
+        // `KEY_ALL_ACCESS`, and stays open for this whole test.
+        unsafe { set_value(key, "a_value", &RegistryValue::Dword(1)) }
+            .expect("RegSetValueExW should succeed");
+        // SAFETY: same as above; this is the operation under test.
+        unsafe { flush_key(key) }.expect("RegFlushKey should succeed");
+
+        // SAFETY: `key` is still the same valid, currently-open handle.
+        unsafe { delete_value(key, "a_value") }.expect("RegDeleteValueW should succeed");
+        // SAFETY: same as above.
         unsafe { close_key(key) }.expect("RegCloseKey should succeed");
         // SAFETY: `HKEY_CURRENT_USER` is the same predefined root.
         unsafe { delete_key(HKEY_CURRENT_USER, subkey.as_str(), 0) }
