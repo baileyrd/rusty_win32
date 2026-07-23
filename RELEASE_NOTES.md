@@ -6,6 +6,20 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #46 — process: add GetProcessTimes wrapper (process::times)
+**2026-07-23** · [#46](https://github.com/baileyrd/rusty_win32/pull/46)
+
+- **Added:** `process::times`, wrapping `GetProcessTimes` — closes the
+  round-2 assessment's other must-have. Without this, rush's `time` builtin
+  had no way to report real per-child CPU time on Windows and always
+  printed a hardcoded zero — a visibly wrong output, not merely a missing
+  feature.
+- `kernel_time`/`user_time` are elapsed *durations* since process creation,
+  not wall-clock timestamps — reuses `Timespec`'s shape the same way
+  `time::now_monotonic`'s result already does for a non-wall-clock value.
+- `PROCESS_QUERY_LIMITED_INFORMATION` added as the narrowest `OpenProcess`
+  access right this call actually needs.
+
 ## PR #45 — process/console: new-process-group spawn + targeted Ctrl-Break delivery
 **2026-07-23** · [#45](https://github.com/baileyrd/rusty_win32/pull/45)
 

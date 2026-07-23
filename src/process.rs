@@ -18,6 +18,7 @@
 
 use crate::error::Win32Error;
 use crate::handle::RawHandle;
+use crate::time::Timespec;
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -99,6 +100,13 @@ unsafe extern "system" {
     fn GetCurrentProcessId() -> u32;
     fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> RawHandle;
     fn TerminateProcess(process: RawHandle, exit_code: u32) -> i32;
+    fn GetProcessTimes(
+        process: RawHandle,
+        creation_time: *mut FileTime,
+        exit_time: *mut FileTime,
+        kernel_time: *mut FileTime,
+        user_time: *mut FileTime,
+    ) -> i32;
     fn GetEnvironmentStringsW() -> *mut u16;
     fn FreeEnvironmentStringsW(penv: *mut u16) -> i32;
     fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> RawHandle;
@@ -165,6 +173,76 @@ pub const PROCESS_TERMINATE: u32 = 0x0001;
 /// [`wait`]/[`wait_any`] (a process handle must carry this right to be
 /// waitable at all).
 pub const SYNCHRONIZE: u32 = 0x0010_0000;
+/// `OpenProcess`'s access-rights bit letting the returned handle be passed to
+/// [`times`].
+pub const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+// FILETIME: `size_of` 8, `align_of` 4 on x86_64 — mirrors `time.rs`'s
+// private struct of the same shape; duplicated locally rather than shared,
+// matching this crate's existing per-module-locality convention for tiny
+// FFI-mirror structs (`fs.rs` does the same).
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct FileTime {
+    low: u32,
+    high: u32,
+}
+const _: () = assert!(core::mem::size_of::<FileTime>() == 8);
+const _: () = assert!(core::mem::align_of::<FileTime>() == 4);
+
+/// 100ns ticks between the FILETIME epoch (1601-01-01) and the Unix epoch
+/// (1970-01-01) — the same standard conversion constant `time.rs`/`fs.rs` use.
+const FILETIME_UNIX_EPOCH_DIFF_100NS: i64 = 116_444_736_000_000_000;
+const HUNDRED_NS_PER_SEC: i64 = 10_000_000;
+const NANOS_PER_HUNDRED_NS: i64 = 100;
+
+/// `creation_time`/`exit_time` are real wall-clock `FILETIME`s (an absolute
+/// point in time, like `time.rs::now_realtime`'s result) — this conversion
+/// subtracts the epoch difference the same way that one does.
+fn filetime_to_timespec(ft: FileTime) -> Timespec {
+    let ticks_100ns =
+        (i64::from(ft.high) << 32 | i64::from(ft.low)) - FILETIME_UNIX_EPOCH_DIFF_100NS;
+    let secs = ticks_100ns.div_euclid(HUNDRED_NS_PER_SEC);
+    let remainder_100ns = ticks_100ns.rem_euclid(HUNDRED_NS_PER_SEC);
+    Timespec {
+        secs,
+        nanos: (remainder_100ns * NANOS_PER_HUNDRED_NS) as u32,
+    }
+}
+
+/// `kernel_time`/`user_time` are documented as an *elapsed duration* (total
+/// CPU time accumulated in that mode), not a point in FILETIME's own epoch —
+/// there is no epoch to subtract, only a raw 100ns tick count to convert to
+/// seconds/nanoseconds. Reuses [`Timespec`]'s shape the same way
+/// `time.rs::now_monotonic`'s result already does for a non-wall-clock
+/// duration.
+fn filetime_to_duration(ft: FileTime) -> Timespec {
+    let ticks_100ns = i64::from(ft.high) << 32 | i64::from(ft.low);
+    let secs = ticks_100ns / HUNDRED_NS_PER_SEC;
+    let remainder_100ns = ticks_100ns % HUNDRED_NS_PER_SEC;
+    Timespec {
+        secs,
+        nanos: (remainder_100ns * NANOS_PER_HUNDRED_NS) as u32,
+    }
+}
+
+/// [`times`]'s result — `GetProcessTimes`, the Windows analog of
+/// `getrusage`/a `wait4`-reported `rusage` for CPU-time accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessTimes {
+    /// When the process was created — a real wall-clock timestamp.
+    pub creation: Timespec,
+    /// When the process exited — a real wall-clock timestamp, but only
+    /// meaningful once the process actually has; Windows reports this as
+    /// zero for a still-running process, not an error.
+    pub exit: Timespec,
+    /// Total time spent executing in kernel mode, as an elapsed *duration*
+    /// since process creation — not a wall-clock timestamp.
+    pub kernel_time: Timespec,
+    /// Total time spent executing in user mode, as an elapsed *duration*
+    /// since process creation — not a wall-clock timestamp.
+    pub user_time: Timespec,
+}
 
 /// `WaitForMultipleObjects`'s own hard cap on `nCount` — a documented Win32
 /// limit, not one this crate invents. [`wait_any`] passing more than this
@@ -622,6 +700,34 @@ pub unsafe fn terminate(process: RawHandle, exit_code: u32) -> Result<(), Win32E
     }
 }
 
+/// CPU-time accounting for `process` — `GetProcessTimes`. `process` needs
+/// only [`PROCESS_QUERY_LIMITED_INFORMATION`] (the narrowest right this
+/// call requires), not [`PROCESS_TERMINATE`]/[`SYNCHRONIZE`] — a handle
+/// obtained purely to report timing doesn't need rights that let it affect
+/// the process at all.
+///
+/// # Safety
+///
+/// `process` must be a currently-open, valid process handle.
+pub unsafe fn times(process: RawHandle) -> Result<ProcessTimes, Win32Error> {
+    let mut creation = FileTime::default();
+    let mut exit = FileTime::default();
+    let mut kernel = FileTime::default();
+    let mut user = FileTime::default();
+    // SAFETY: `process` is caller-supplied per this function's own safety
+    // contract; all four out-pointers are valid, correctly-sized locals.
+    let ok = unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) };
+    if ok == 0 {
+        return Err(Win32Error::last());
+    }
+    Ok(ProcessTimes {
+        creation: filetime_to_timespec(creation),
+        exit: filetime_to_timespec(exit),
+        kernel_time: filetime_to_duration(kernel),
+        user_time: filetime_to_duration(user),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -936,5 +1042,48 @@ mod tests {
             !found.exe_file.is_empty(),
             "the calling process's own entry should report a non-empty exe_file"
         );
+    }
+
+    #[test]
+    fn times_reports_plausible_creation_and_exit_timestamps() {
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known system binary.
+        let spawned = unsafe { spawn_suspended("cmd.exe /c exit 0", false, false, None) }
+            .expect("CreateProcessW should succeed");
+        // SAFETY: `spawned.thread` is freshly created, valid, not yet
+        // resumed.
+        unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
+
+        // Queried before waiting for the exit — `cmd.exe /c exit 0` may
+        // already be done by now, so only `creation`/`kernel_time`/
+        // `user_time` are asserted on here, not `exit`.
+        // SAFETY: `spawned.process` is a valid, currently-open handle.
+        let before = unsafe { times(spawned.process) }.expect("GetProcessTimes should succeed");
+        assert!(
+            before.creation.secs > 1_700_000_000,
+            "creation should be a plausible wall-clock timestamp (after ~2023)"
+        );
+        assert!(before.kernel_time.nanos < 1_000_000_000);
+        assert!(before.user_time.nanos < 1_000_000_000);
+
+        // SAFETY: `spawned.process` is still the same valid handle.
+        unsafe { wait(spawned.process, None) }.unwrap();
+
+        // SAFETY: same valid handle, now signaled/exited.
+        let after = unsafe { times(spawned.process) }.expect("GetProcessTimes should succeed");
+        assert!(
+            after.exit.secs > 1_700_000_000,
+            "exit should be a plausible wall-clock timestamp once the process has exited"
+        );
+        assert!(
+            after.exit.secs >= after.creation.secs,
+            "exit must not precede creation"
+        );
+
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+        }
     }
 }
