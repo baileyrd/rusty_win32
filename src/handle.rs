@@ -65,6 +65,13 @@ unsafe extern "system" {
         name: *const u16,
     ) -> RawHandle;
     fn ReleaseMutex(mutex: RawHandle) -> i32;
+    fn CreateSemaphoreW(
+        semaphore_attributes: *const core::ffi::c_void,
+        initial_count: i32,
+        maximum_count: i32,
+        name: *const u16,
+    ) -> RawHandle;
+    fn ReleaseSemaphore(semaphore: RawHandle, release_count: i32, previous_count: *mut i32) -> i32;
 }
 
 /// `GetStdHandle`/`SetStdHandle`'s `nStdHandle` slot selector for the
@@ -345,6 +352,61 @@ pub unsafe fn release_mutex(mutex: RawHandle) -> Result<(), Win32Error> {
     }
 }
 
+/// Create (or open, if `name` already names an existing one) a named or
+/// unnamed counting semaphore — `CreateSemaphoreW`, alongside
+/// [`create_mutex`] the other standard Win32 synchronization primitive.
+/// `initial_count` is the semaphore's starting count (must be between `0`
+/// and `maximum_count` inclusive); `maximum_count` is the upper bound
+/// [`release_semaphore`] can raise it back to. `name`, if given, makes the
+/// semaphore visible to any process naming the same string, the same as
+/// [`create_mutex`]'s `name` parameter. No current `rush` feature asks for
+/// this; filed for Win32 parity.
+pub fn create_semaphore(
+    name: Option<&str>,
+    initial_count: i32,
+    maximum_count: i32,
+) -> Result<RawHandle, Win32Error> {
+    extern crate alloc;
+    let wide: Option<alloc::vec::Vec<u16>> =
+        name.map(|n| n.encode_utf16().chain(core::iter::once(0)).collect());
+    let name_ptr = wide.as_ref().map_or(core::ptr::null(), |w| w.as_ptr());
+    // SAFETY: `semaphore_attributes = NULL` requests default (non-inheritable)
+    // security attributes, a documented valid input; `name_ptr` is either
+    // NULL (documented as "create an unnamed semaphore") or a valid,
+    // NUL-terminated UTF-16 string kept alive for the duration of this call.
+    let handle =
+        unsafe { CreateSemaphoreW(core::ptr::null(), initial_count, maximum_count, name_ptr) };
+    if handle.is_null() {
+        Err(Win32Error::last())
+    } else {
+        Ok(handle)
+    }
+}
+
+/// Increase `semaphore`'s count by `release_count`, returning the count
+/// just before the release — `ReleaseSemaphore`. Acquiring is already
+/// covered by this crate's `WaitForSingleObject`-shaped wait primitives
+/// (e.g. [`crate::process::wait`]'s underlying call) once a handle is in
+/// hand — this function only releases.
+///
+/// # Safety
+///
+/// `semaphore` must be a currently-open, valid semaphore handle.
+pub unsafe fn release_semaphore(
+    semaphore: RawHandle,
+    release_count: i32,
+) -> Result<i32, Win32Error> {
+    let mut previous_count: i32 = 0;
+    // SAFETY: `semaphore` is caller-supplied per this function's own safety
+    // contract; `previous_count` is a valid, distinct local out-pointer.
+    let ok = unsafe { ReleaseSemaphore(semaphore, release_count, &mut previous_count) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(previous_count)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,5 +633,46 @@ mod tests {
         // SAFETY: `mutex` is still a valid, currently-open handle, closed
         // exactly once and not used again after this.
         unsafe { close(mutex).unwrap() };
+    }
+
+    #[test]
+    fn create_semaphore_then_release_semaphore_round_trips() {
+        let semaphore = create_semaphore(None, 1, 1).expect("CreateSemaphoreW should succeed");
+
+        // SAFETY: `semaphore` is a freshly created, valid, waitable handle
+        // with an initial count of 1.
+        let acquired = unsafe { crate::console::wait_readable(semaphore, 0) }
+            .expect("WaitForSingleObject should succeed acquiring a non-zero-count semaphore");
+        assert!(
+            acquired,
+            "a semaphore with initial_count 1 should be immediately acquirable once"
+        );
+
+        // The count is now 0 — a second immediate wait should time out.
+        // SAFETY: same handle.
+        let acquired_again = unsafe { crate::console::wait_readable(semaphore, 0) }
+            .expect("WaitForSingleObject should succeed (report a timeout, not fail)");
+        assert!(
+            !acquired_again,
+            "a semaphore just drained to 0 should not be immediately acquirable again"
+        );
+
+        // SAFETY: `semaphore` is a valid, currently-open semaphore handle;
+        // this is the operation under test.
+        let previous =
+            unsafe { release_semaphore(semaphore, 1) }.expect("ReleaseSemaphore should succeed");
+        assert_eq!(previous, 0, "count just before this release should be 0");
+
+        // SAFETY: same handle, now released back to a non-zero count.
+        let acquired_after_release = unsafe { crate::console::wait_readable(semaphore, 0) }
+            .expect("WaitForSingleObject should succeed after the semaphore was released");
+        assert!(
+            acquired_after_release,
+            "the semaphore should be acquirable again after release_semaphore"
+        );
+
+        // SAFETY: `semaphore` is still a valid, currently-open handle,
+        // closed exactly once and not used again after this.
+        unsafe { close(semaphore).unwrap() };
     }
 }
