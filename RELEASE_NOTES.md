@@ -6,6 +6,32 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #211 — console: add alloc/free/attach (AllocConsole/FreeConsole/AttachConsole)
+**2026-07-23** · [#211](https://github.com/baileyrd/rusty_win32/pull/211)
+
+- **Added:** `console::alloc`/`console::free`/`console::attach`
+  (`AllocConsole`/`FreeConsole`/`AttachConsole`), closing issue #140 — lets a
+  GUI-subsystem process acquire a console on demand, release it, or attach
+  to another process's (`attach(None)` maps to `ATTACH_PARENT_PROCESS`).
+  This crate's own test helper (`ensure_console_stdin`) already used
+  `AllocConsole` internally; it now calls through the public `alloc()`
+  instead of a private duplicate extern. Another round-2 "weak/no clear
+  consumer" item (`gap-analysis.md`); no current `rush` feature asks for
+  this.
+- **Fixed:** a CI-caught bug in this PR's own new test for `attach` — it
+  called `free()` on the shared test-process console, then attempted to
+  `attach()` to a child process's inherited console, which failed
+  (`Win32Error(31)`) in this hosting environment. Because the test never
+  restored a console on that failure path, every later test run
+  afterward (alphabetically) inherited a console-less process, breaking
+  an unrelated, pre-existing test
+  (`ctrl_c_event_cannot_be_scoped_to_a_process_group`) that implicitly
+  depends on one being attached. Replaced with a non-destructive test of
+  `attach`'s documented error path instead (`AttachConsole` rejects the
+  call outright when the caller already has a console) — this never
+  detaches the shared console, so it can't leak a broken state into
+  later tests.
+
 ## PR #210 — console: add window_handle (GetConsoleWindow)
 **2026-07-23** · [#210](https://github.com/baileyrd/rusty_win32/pull/210)
 
