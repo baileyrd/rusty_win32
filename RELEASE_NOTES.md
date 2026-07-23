@@ -6,6 +6,16 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #199 — volume: add volume_path_name (GetVolumePathNameW)
+**2026-07-23** · [#199](https://github.com/baileyrd/rusty_win32/pull/199)
+
+- **Added:** `volume::volume_path_name` (`GetVolumePathNameW`), closing
+  issue #128 — maps an arbitrary file/directory path to the root path of
+  the volume it's on, the reverse direction of `volume_information`/
+  `disk_free_space`'s own root-path parameter. Another round-2 "weak/no
+  clear consumer" item (`gap-analysis.md`); no current `rush` feature asks
+  for this.
+
 ## PR #198 — volume: add find_volumes (FindFirstVolumeW/FindNextVolumeW/FindVolumeClose)
 **2026-07-23** · [#198](https://github.com/baileyrd/rusty_win32/pull/198)
 
