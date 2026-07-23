@@ -15,6 +15,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   Job Object limits) and `job::accounting`
   (`JobObjectBasicAndIoAccountingInformation`), the narrow subset of `ulimit`
   a Job Object can enforce, plus lifetime CPU/IO accounting.
+- `pipe` module: named pipes (`CreateNamedPipeW`/`ConnectNamedPipeW`/
+  `WaitNamedPipeW`/`CreateFileW`), the primitive rush's deferred process
+  substitution (`<(cmd)`) and `coproc` support need on Windows.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

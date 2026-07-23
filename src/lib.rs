@@ -190,6 +190,21 @@
 //! shape for an elapsed *duration* rather than a wall-clock timestamp —
 //! the same reuse [`time::now_monotonic`]'s result already relies on.
 //!
+//! [`job::set_resource_limits`]/[`job::limits`]/[`job::accounting`] close
+//! the round-2 assessment's Job-Object item: rush's `ulimit` is flat "not
+//! supported" on Windows today, and Job-Object memory/CPU-time/
+//! active-process limits are that doc's own answer for the only realistic
+//! partial fix — the struct fields these use were already modeled
+//! bit-for-bit for [`job::set_kill_on_close`], just never set beyond its
+//! one `LimitFlags` bit until now.
+//!
+//! [`pipe`] (`CreateNamedPipeW`/`ConnectNamedPipeW`/`WaitNamedPipeW`/
+//! `CreateFileW`) closes the round-2 assessment's remaining Job-Object-
+//! adjacent gap by a different route: the one concrete missing primitive
+//! blocking rush's already-deferred process substitution (`<(cmd)`) and
+//! `coproc` support on Windows, since [`handle::create_pipe`]'s anonymous
+//! pipes have no name an arbitrary already-running program can open.
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or
@@ -249,3 +264,10 @@ pub use path::{resolve_command, search_path};
 // `rusty_win32::fs::*`.
 #[cfg(windows)]
 pub mod fs;
+
+// `pipe`'s several-item surface (four functions plus the `PIPE_*`/
+// `GENERIC_*` mode constants) is deliberately not re-exported at the crate
+// root either, for the same reason as `job`'s/`fs`'s — reach it via
+// `rusty_win32::pipe::*`.
+#[cfg(windows)]
+pub mod pipe;

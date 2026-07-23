@@ -6,6 +6,25 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #48 — Add pipe module: named pipes (CreateNamedPipeW/ConnectNamedPipeW/WaitNamedPipeW)
+**2026-07-23** · [#48](https://github.com/baileyrd/rusty_win32/pull/48)
+
+- **Added:** `pipe::create_server`/`connect_server`/`wait_for_server`/
+  `open_client`, wrapping `CreateNamedPipeW`/`ConnectNamedPipeW`/
+  `WaitNamedPipeW`/`CreateFileW` — closes the round-2 assessment's named-pipe
+  gap. `handle::create_pipe`'s anonymous pipes have no name an arbitrary
+  already-running program can open; rush's own `docs/WINDOWS_JOB_CONTROL.md`
+  and `docs/CAPABILITY_GAPS.md` both name this as the missing primitive
+  blocking process substitution (`<(cmd)`) and `coproc` on Windows.
+- `connect_server` treats the documented `ERROR_PIPE_CONNECTED` race
+  (client connects before the server calls `ConnectNamedPipeW`) as success,
+  not a failure — the same pattern `process::list_processes` already uses
+  for `ERROR_NO_MORE_FILES`.
+- No `OVERLAPPED` support yet, matching this crate's existing synchronous-
+  I/O convention elsewhere (`handle`'s anonymous pipes, `console::read`).
+- `error.rs` gained `ERROR_PIPE_CONNECTED`/`ERROR_PIPE_BUSY` named
+  constants.
+
 ## PR #47 — job: add resource-limit set/query and CPU/IO accounting
 **2026-07-23** · [#47](https://github.com/baileyrd/rusty_win32/pull/47)
 
