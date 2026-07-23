@@ -237,6 +237,14 @@
 //! `CancelIoEx` on timeout rather than leaving a caller with no way to
 //! ever give up waiting.
 //!
+//! [`path::current_dir`]/[`path::set_current_dir`] (`GetCurrentDirectoryW`/
+//! `SetCurrentDirectoryW`) come from a parity-loop pass against the real
+//! Win32 API surface (`gap-analysis.md`), not the round-2 capability
+//! assessment above — a systematic function-level sweep rather than a
+//! needs-driven inventory. This particular gap turned out to be the most
+//! surprising finding in that sweep: the actual Win32 primitives behind
+//! `cd`/`pwd`, and nothing in this crate wrapped them at all until now.
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or
@@ -288,7 +296,7 @@ pub use time::{Timespec, now_monotonic, now_realtime};
 #[cfg(windows)]
 pub mod path;
 #[cfg(windows)]
-pub use path::{long_path, resolve_command, search_path, short_path};
+pub use path::{current_dir, long_path, resolve_command, search_path, set_current_dir, short_path};
 
 // `fs`'s several-item surface (two functions, two result structs, and the
 // `FILE_ATTRIBUTE_*` constants) is deliberately not re-exported at the

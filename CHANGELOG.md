@@ -33,6 +33,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   wrapped in `OVERLAPPED` I/O with a `process::wait`-style `Option<u32>`
   timeout — this crate's first genuinely overlapped primitive, since
   `ReadDirectoryChangesW` has no other way to bound how long it blocks.
+- `path::current_dir`/`path::set_current_dir` (`GetCurrentDirectoryW`/
+  `SetCurrentDirectoryW`) — the actual Win32 primitives behind `cd`/`pwd`,
+  found by a parity-loop pass against the real Win32 API surface
+  (`gap-analysis.md`) rather than the round-2 needs-driven assessment above.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
