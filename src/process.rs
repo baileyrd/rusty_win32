@@ -128,7 +128,45 @@ unsafe extern "system" {
     fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> RawHandle;
     fn Process32FirstW(snapshot: RawHandle, entry: *mut ProcessEntry32W) -> i32;
     fn Process32NextW(snapshot: RawHandle, entry: *mut ProcessEntry32W) -> i32;
+    fn Thread32First(snapshot: RawHandle, entry: *mut ThreadEntry32) -> i32;
+    fn Thread32Next(snapshot: RawHandle, entry: *mut ThreadEntry32) -> i32;
+    fn OpenThread(desired_access: u32, inherit_handle: i32, thread_id: u32) -> RawHandle;
+    fn SuspendThread(thread: RawHandle) -> u32;
 }
+
+/// `CreateToolhelp32Snapshot`'s `dwFlags`: include every thread currently
+/// running on the system in the snapshot (there's no per-process filter at
+/// the `CreateToolhelp32Snapshot` level — [`list_threads`] filters by
+/// `th32OwnerProcessID` itself after the fact).
+const TH32CS_SNAPTHREAD: u32 = 0x0000_0004;
+
+// THREADENTRY32: `size_of` 28, `align_of` 4 on x86_64. Verified against
+// mingw-w64's `tlhelp32.h` the same way as `ProcessEntry32W` (a
+// `_Static_assert` probe compiled with `x86_64-w64-mingw32-gcc` against the
+// real header).
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct ThreadEntry32 {
+    dw_size: u32,
+    cnt_usage: u32,
+    th32_thread_id: u32,
+    th32_owner_process_id: u32,
+    tp_base_pri: i32,
+    tp_delta_pri: i32,
+    dw_flags: u32,
+}
+const _: () = assert!(core::mem::size_of::<ThreadEntry32>() == 28);
+const _: () = assert!(core::mem::align_of::<ThreadEntry32>() == 4);
+const _: () = assert!(core::mem::offset_of!(ThreadEntry32, cnt_usage) == 4);
+const _: () = assert!(core::mem::offset_of!(ThreadEntry32, th32_thread_id) == 8);
+const _: () = assert!(core::mem::offset_of!(ThreadEntry32, th32_owner_process_id) == 12);
+const _: () = assert!(core::mem::offset_of!(ThreadEntry32, tp_base_pri) == 16);
+const _: () = assert!(core::mem::offset_of!(ThreadEntry32, tp_delta_pri) == 20);
+const _: () = assert!(core::mem::offset_of!(ThreadEntry32, dw_flags) == 24);
+
+/// `OpenThread`'s access-rights bit letting the returned handle be passed
+/// to [`suspend_thread`]/[`resume`].
+pub const THREAD_SUSPEND_RESUME: u32 = 0x0002;
 
 /// `CreateToolhelp32Snapshot`'s `dwFlags`: include every process currently
 /// running in the snapshot.
@@ -683,6 +721,92 @@ pub fn list_processes() -> Result<Vec<ProcessEntry>, Win32Error> {
 fn decode_exe_file(units: &[u16; 260]) -> alloc::string::String {
     let len = units.iter().position(|&u| u == 0).unwrap_or(units.len());
     alloc::string::String::from_utf16_lossy(&units[..len])
+}
+
+/// List the thread ids belonging to process `pid` — `CreateToolhelp32Snapshot`
+/// (`TH32CS_SNAPTHREAD`)/`Thread32First`/`Thread32Next`, filtered by
+/// `th32OwnerProcessID` after the fact since the snapshot itself always
+/// covers every thread on the system, not just one process's. The missing
+/// "pause the whole process" primitive Windows has no direct equivalent
+/// for — the closest is suspending every one of a process's threads
+/// individually via [`open_thread`]/[`suspend_thread`], the `SIGSTOP`
+/// analog a future `bg`/`fg`/Ctrl-Z-style feature would need (currently
+/// out of `rush`'s scope, per its own `docs/WINDOWS_JOB_CONTROL.md`).
+pub fn list_threads(pid: u32) -> Result<Vec<u32>, Win32Error> {
+    // SAFETY: `TH32CS_SNAPTHREAD` is a documented-valid flag on its own;
+    // `process_id = 0` is required for a thread snapshot (the process-id
+    // filter parameter is documented as ignored for this snapshot type).
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot.is_null() || snapshot as isize == -1 {
+        return Err(Win32Error::last());
+    }
+
+    let mut entry = ThreadEntry32 {
+        dw_size: core::mem::size_of::<ThreadEntry32>() as u32,
+        ..ThreadEntry32::default()
+    };
+    let mut thread_ids = Vec::new();
+    // SAFETY: `snapshot` is freshly created and valid; `entry` is a valid,
+    // correctly-sized (`dw_size` set, as both calls require) out-pointer.
+    let mut found = unsafe { Thread32First(snapshot, &mut entry) };
+    while found != 0 {
+        if entry.th32_owner_process_id == pid {
+            thread_ids.push(entry.th32_thread_id);
+        }
+        // SAFETY: same as above — `snapshot`/`entry` are still the same
+        // valid handle/out-pointer.
+        found = unsafe { Thread32Next(snapshot, &mut entry) };
+    }
+    // Same "FALSE + ERROR_NO_MORE_FILES means ordinary end-of-enumeration"
+    // convention `list_processes` relies on for `Process32NextW`.
+    let last_error = Win32Error::last();
+    // SAFETY: `snapshot` is a valid, currently-open handle, closed exactly
+    // once and not used again after this.
+    let _ = unsafe { crate::handle::close(snapshot) };
+    if last_error != Win32Error::ERROR_NO_MORE_FILES {
+        return Err(last_error);
+    }
+    Ok(thread_ids)
+}
+
+/// Open a handle to the thread named by `thread_id` — `OpenThread`, the
+/// thread-level counterpart to [`open_by_pid`]. Needed to turn one of
+/// [`list_threads`]'s thread ids into a handle [`suspend_thread`]/[`resume`]
+/// can act on.
+pub fn open_thread(thread_id: u32, desired_access: u32) -> Result<RawHandle, Win32Error> {
+    // SAFETY: `desired_access` is a plain access-rights bitmask, not a
+    // pointer; `inherit_handle = FALSE` (0) is a documented valid input;
+    // `thread_id` is caller-supplied and `OpenThread` itself reports an
+    // unknown or inaccessible one as an ordinary `NULL`/`GetLastError`
+    // failure, not undefined behavior.
+    let handle = unsafe { OpenThread(desired_access, 0, thread_id) };
+    if handle.is_null() {
+        Err(Win32Error::last())
+    } else {
+        Ok(handle)
+    }
+}
+
+/// Suspend `thread` — `SuspendThread`, the Windows analog of `SIGSTOP` at
+/// the individual-thread level (Windows has no process-wide stop
+/// primitive; pausing every thread [`list_threads`] reports for a process
+/// is the closest equivalent). Pair with [`resume`] to continue it again —
+/// the `SIGCONT` half already wrapped for `spawn_suspended`'s own use.
+/// Returns the thread's previous suspend count.
+///
+/// # Safety
+///
+/// `thread` must be a currently-open, valid thread handle with the
+/// [`THREAD_SUSPEND_RESUME`] access right.
+pub unsafe fn suspend_thread(thread: RawHandle) -> Result<u32, Win32Error> {
+    // SAFETY: `thread` is caller-supplied per this function's own safety
+    // contract; `SuspendThread` has no further precondition.
+    let previous_suspend_count = unsafe { SuspendThread(thread) };
+    if previous_suspend_count == u32::MAX {
+        Err(Win32Error::last())
+    } else {
+        Ok(previous_suspend_count)
+    }
 }
 
 /// Resume a thread suspended by [`spawn_suspended`] (or any other
@@ -1649,6 +1773,47 @@ mod tests {
 
         // SAFETY: both handles are valid and each closed exactly once.
         unsafe {
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+        }
+    }
+
+    #[test]
+    fn list_threads_open_thread_suspend_and_resume_round_trip() {
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known long-running system command.
+        let spawned =
+            unsafe { spawn_suspended("cmd.exe /c ping -n 30 127.0.0.1 >nul", false, false, None) }
+                .expect("CreateProcessW should succeed");
+        // SAFETY: `spawned.thread` is freshly created, valid, not yet
+        // resumed.
+        unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
+
+        let thread_ids = list_threads(spawned.process_id)
+            .expect("CreateToolhelp32Snapshot/Thread32First/Thread32Next should succeed");
+        assert!(
+            thread_ids.contains(&spawned.thread_id),
+            "the process's own main thread id should appear in its thread list"
+        );
+
+        let thread_handle = open_thread(spawned.thread_id, THREAD_SUSPEND_RESUME)
+            .expect("OpenThread should succeed for a live thread id this test itself just started");
+
+        // SAFETY: `thread_handle` is a freshly opened, valid handle with
+        // THREAD_SUSPEND_RESUME; this is the operation under test.
+        unsafe { suspend_thread(thread_handle) }.expect("SuspendThread should succeed");
+        // SAFETY: same handle.
+        unsafe { resume(thread_handle) }.expect("ResumeThread should succeed");
+
+        // SAFETY: `spawned.process` is a valid, currently-open handle with
+        // full access rights (CreateProcessW itself opened it).
+        unsafe { terminate(spawned.process, 0) }.expect("TerminateProcess should succeed");
+        // SAFETY: still the same valid handle.
+        unsafe { wait(spawned.process, Some(5_000)) }.unwrap();
+
+        // SAFETY: every handle here is valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(thread_handle).unwrap();
             crate::handle::close(spawned.process).unwrap();
             crate::handle::close(spawned.thread).unwrap();
         }

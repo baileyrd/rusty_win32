@@ -110,6 +110,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   (`GetPriorityClass`/`SetPriorityClass`) plus the `*_PRIORITY_CLASS`
   constants, the Windows analog of `nice`/`renice` — another parity-loop
   find.
+- `process::list_threads`/`process::open_thread`/`process::suspend_thread`
+  (`Thread32First`/`Thread32Next`/`OpenThread`/`SuspendThread`) plus
+  `THREAD_SUSPEND_RESUME`, the closest Windows equivalent to a
+  process-wide `SIGSTOP` — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

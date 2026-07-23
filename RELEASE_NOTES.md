@@ -6,6 +6,22 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #115 — process: add list_threads/open_thread/suspend_thread (Thread32First/Thread32Next/OpenThread/SuspendThread)
+**2026-07-23** · [#115](https://github.com/baileyrd/rusty_win32/pull/115)
+
+- **Added:** `process::list_threads` (`CreateToolhelp32Snapshot`
+  `TH32CS_SNAPTHREAD`/`Thread32First`/`Thread32Next`),
+  `process::open_thread` (`OpenThread`), and `process::suspend_thread`
+  (`SuspendThread`) plus `THREAD_SUSPEND_RESUME` — closing issue #82 from
+  the parity-loop sweep. Windows has no process-wide stop primitive the
+  way Unix `SIGSTOP` does; pausing every thread a process owns
+  individually is the closest equivalent, the missing "pause it instead"
+  counterpart to `job::terminate`'s "kill a whole job." `resume` (already
+  wrapped for `spawn_suspended`'s own use) is the `SIGCONT` half — no new
+  resume wrapper needed. `THREADENTRY32`'s layout independently verified
+  via a compiled mingw-w64 C probe. Filed for a future `bg`/`fg`/Ctrl-Z-
+  style feature currently out of `rush`'s scope, not to enable it now.
+
 ## PR #114 — process: add priority_class/set_priority_class (GetPriorityClass/SetPriorityClass)
 **2026-07-23** · [#114](https://github.com/baileyrd/rusty_win32/pull/114)
 
