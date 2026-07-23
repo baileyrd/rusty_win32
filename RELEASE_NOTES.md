@@ -6,6 +6,22 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #234 — security: add well_known_sid
+**2026-07-23** · [#234](https://github.com/baileyrd/rusty_win32/pull/234)
+
+- **Added:** `security::well_known_sid` (`CreateWellKnownSid`) plus
+  `WellKnownSidType` (`Everyone`/`LocalSystem`/`BuiltinAdministrators`),
+  closing issue #163 — constructs a well-known SID directly, without
+  PR #229's `lookup_account_name` name-lookup round trip. Uses the
+  query-size-then-allocate idiom (`CreateWellKnownSid` itself reports the
+  required buffer size on a first null-buffer call, matching
+  `lookup_account_sid`/`lookup_account_name`'s existing pattern) and
+  reuses the existing `SidBuf` type. Only the three variants this issue
+  named are exposed; `CreateWellKnownSid` supports many more, left out
+  until a real need for them shows up. Tested against PR #233's
+  `sid_equal` (constructing `Everyone` matches `lookup_account_name`'s own
+  resolution of it) and PR #232's `is_valid_sid`.
+
 ## PR #233 — security: add sid_equal
 **2026-07-23** · [#233](https://github.com/baileyrd/rusty_win32/pull/233)
 

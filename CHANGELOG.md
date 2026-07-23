@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `security::well_known_sid` (`CreateWellKnownSid`) plus `WellKnownSidType`
+  (`Everyone`/`LocalSystem`/`BuiltinAdministrators`) — construct a
+  well-known SID without a name-lookup round trip.
 - `security::sid_equal` (`EqualSid`) — byte-correct SID comparison; a
   naive memory comparison isn't safe here since a `PSID`'s trailing
   sub-authority count varies its total size.
