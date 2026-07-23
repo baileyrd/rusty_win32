@@ -105,6 +105,7 @@ unsafe extern "system" {
     fn GetSystemInfo(system_info: *mut SystemInfo);
     fn GetComputerNameW(buffer: *mut u16, size: *mut u32) -> i32;
     fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+    fn SetErrorMode(mode: u32) -> u32;
     fn QueryFullProcessImageNameW(
         process: RawHandle,
         flags: u32,
@@ -1035,6 +1036,28 @@ pub fn memory_status() -> Result<MemoryStatus, Win32Error> {
     })
 }
 
+/// `SetErrorMode`'s bit for suppressing the blocking GUI dialog a hardware
+/// or media error (e.g. an empty removable drive, a network path that's
+/// gone away) would otherwise pop up — the single most important bit for a
+/// non-interactive script run, since without it such an error freezes the
+/// whole process waiting for a click that will never come.
+pub const SEM_FAILCRITICALERRORS: u32 = 0x0001;
+/// `SetErrorMode`'s bit for suppressing the "file not found"-style dialog
+/// `OpenFile` would otherwise show.
+pub const SEM_NOOPENFILEERRORBOX: u32 = 0x8000;
+
+/// Set the calling process's error mode (the `SEM_*` bits above), returning
+/// the previous mode — `SetErrorMode`. No `Result`: `SetErrorMode` has no
+/// documented failure mode, matching this crate's already-established
+/// "never fails" pattern (e.g. `GetDriveTypeW`, `sleep_ms`). Applies
+/// process-wide and is inherited by child processes, so calling this once
+/// early in a shell's own startup (before spawning anything) is enough to
+/// cover the whole process tree.
+pub fn set_error_mode(mode: u32) -> u32 {
+    // SAFETY: `SetErrorMode` has no precondition beyond a plain bitmask.
+    unsafe { SetErrorMode(mode) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1518,6 +1541,16 @@ mod tests {
         assert!(
             status.avail_page_file <= status.total_page_file,
             "available page-file space can't exceed the total"
+        );
+    }
+
+    #[test]
+    fn set_error_mode_returns_the_previous_mode() {
+        let original = set_error_mode(SEM_FAILCRITICALERRORS);
+        let previous = set_error_mode(original);
+        assert_eq!(
+            previous, SEM_FAILCRITICALERRORS,
+            "SetErrorMode should return the mode just set by the prior call"
         );
     }
 }

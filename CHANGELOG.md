@@ -86,6 +86,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `$HOSTNAME`/a `hostname` builtin — another parity-loop find.
 - `process::memory_status` (`GlobalMemoryStatusEx`), system-wide memory
   totals/load for a `free`-style builtin — another parity-loop find.
+- `process::set_error_mode` (`SetErrorMode`) plus
+  `SEM_FAILCRITICALERRORS`/`SEM_NOOPENFILEERRORBOX`, suppressing blocking
+  GUI error dialogs that would otherwise freeze a non-interactive script
+  run — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
