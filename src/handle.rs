@@ -47,6 +47,7 @@ unsafe extern "system" {
         options: u32,
     ) -> i32;
     fn SetHandleInformation(object: RawHandle, mask: u32, flags: u32) -> i32;
+    fn GetHandleInformation(object: RawHandle, flags: *mut u32) -> i32;
     fn CloseHandle(object: RawHandle) -> i32;
     fn PeekNamedPipe(
         named_pipe: RawHandle,
@@ -157,6 +158,30 @@ pub unsafe fn set_inheritable(handle: RawHandle, inheritable: bool) -> Result<()
         Err(Win32Error::last())
     } else {
         Ok(())
+    }
+}
+
+/// Read `handle`'s current handle-information flags — `GetHandleInformation`,
+/// the read-side counterpart to [`set_inheritable`]'s write-only
+/// `SetHandleInformation` wrapper. Returns the raw flags bitmask
+/// unmodified (the `HANDLE_FLAG_INHERIT` bit [`set_inheritable`] itself
+/// toggles, plus `HANDLE_FLAG_PROTECT_FROM_CLOSE`, which this crate doesn't
+/// otherwise expose) — deciding what to do with it is the caller's policy,
+/// the same way this crate exposes other raw bitmask fields
+/// (`FILE_ATTRIBUTE_*`, `ENABLE_*`) without deciding what they mean.
+///
+/// # Safety
+///
+/// `handle` must be a currently-open, valid handle.
+pub unsafe fn handle_information(handle: RawHandle) -> Result<u32, Win32Error> {
+    let mut flags: u32 = 0;
+    // SAFETY: `handle` is caller-supplied per this function's own safety
+    // contract; `flags` is a valid out-pointer.
+    let ok = unsafe { GetHandleInformation(handle, &mut flags) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(flags)
     }
 }
 
@@ -329,6 +354,35 @@ mod tests {
         unsafe {
             set_inheritable(write_handle, true).expect("marking inheritable should succeed");
             set_inheritable(write_handle, false).expect("clearing inheritable should succeed");
+            close(read_handle).unwrap();
+            close(write_handle).unwrap();
+        }
+    }
+
+    #[test]
+    fn handle_information_reflects_set_inheritable() {
+        let (read_handle, write_handle) = create_pipe().expect("CreatePipe should succeed");
+        // SAFETY: `write_handle` is freshly created and valid for the
+        // duration of this test.
+        unsafe {
+            set_inheritable(write_handle, true).expect("marking inheritable should succeed");
+            let flags_when_set =
+                handle_information(write_handle).expect("GetHandleInformation should succeed");
+            assert_ne!(
+                flags_when_set & HANDLE_FLAG_INHERIT,
+                0,
+                "the inherit bit should be set after set_inheritable(true)"
+            );
+
+            set_inheritable(write_handle, false).expect("clearing inheritable should succeed");
+            let flags_when_cleared =
+                handle_information(write_handle).expect("GetHandleInformation should succeed");
+            assert_eq!(
+                flags_when_cleared & HANDLE_FLAG_INHERIT,
+                0,
+                "the inherit bit should be clear after set_inheritable(false)"
+            );
+
             close(read_handle).unwrap();
             close(write_handle).unwrap();
         }

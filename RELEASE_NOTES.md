@@ -6,6 +6,16 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #101 — handle: add handle_information (GetHandleInformation)
+**2026-07-23** · [#101](https://github.com/baileyrd/rusty_win32/pull/101)
+
+- **Added:** `handle::handle_information` (`GetHandleInformation`), closing
+  issue #68 from the parity-loop sweep. The read-side counterpart to
+  `set_inheritable`'s write-only `SetHandleInformation` wrapper — e.g. to
+  verify a redirection setup before/after marking a handle inheritable.
+  Returns the raw flags bitmask unmodified, matching this crate's existing
+  policy-free convention for other raw bitmask fields.
+
 ## PR #100 — pipe: add disconnect_server (DisconnectNamedPipe)
 **2026-07-23** · [#100](https://github.com/baileyrd/rusty_win32/pull/100)
 

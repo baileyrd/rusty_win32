@@ -73,6 +73,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `pipe::disconnect_server` (`DisconnectNamedPipe`), letting a served pipe
   instance be reset and reused for a second client instead of requiring a
   fresh server — another parity-loop find.
+- `handle::handle_information` (`GetHandleInformation`), the read-side
+  counterpart to `set_inheritable` — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
