@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `registry::create_key` (`RegCreateKeyExW`) plus `KeyDisposition`
+  (`CreatedNewKey`/`OpenedExistingKey`) — an idempotent "open or create"
+  in one call, reporting via the returned disposition which one happened.
 - `registry::open_key`/`registry::close_key` (`RegOpenKeyExW`/
   `RegCloseKey`) plus `KEY_READ`/`KEY_WRITE`/`KEY_ALL_ACCESS`/
   `KEY_QUERY_VALUE` REGSAM constants — opening a subkey of a predefined
