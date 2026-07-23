@@ -6,6 +6,21 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #118 — fs: add lock_file/unlock_file (LockFileEx/UnlockFileEx)
+**2026-07-23** · [#118](https://github.com/baileyrd/rusty_win32/pull/118)
+
+- **Added:** `fs::lock_file`/`fs::unlock_file` (`LockFileEx`/`UnlockFileEx`),
+  closing issue #85 — the last of the 32 issues filed from the
+  parity-loop's Win32 coverage sweep (`gap-analysis.md`). The Windows
+  analog of `flock` at the file level, an alternative to
+  `handle::create_mutex`'s named-mutex option for the same
+  shared-history-file-locking use case. Reuses the same `OVERLAPPED`
+  shape `watch.rs` already models (duplicated locally per this crate's
+  per-module convention), since `LockFileEx`/`UnlockFileEx` require a
+  non-NULL `OVERLAPPED` even for an ordinary synchronous handle, using it
+  only to carry the 64-bit lock offset. No current `rush` feature asks
+  for this; filed for tracking.
+
 ## PR #117 — handle: add create_mutex/release_mutex (CreateMutexW/ReleaseMutex)
 **2026-07-23** · [#117](https://github.com/baileyrd/rusty_win32/pull/117)
 

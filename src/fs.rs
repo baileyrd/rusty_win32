@@ -245,7 +245,48 @@ unsafe extern "system" {
         security_attributes: *const core::ffi::c_void,
     ) -> i32;
     fn RemoveDirectoryW(path_name: *const u16) -> i32;
+    fn LockFileEx(
+        file: RawHandle,
+        flags: u32,
+        reserved: u32,
+        number_of_bytes_to_lock_low: u32,
+        number_of_bytes_to_lock_high: u32,
+        overlapped: *mut Overlapped,
+    ) -> i32;
+    fn UnlockFileEx(
+        file: RawHandle,
+        reserved: u32,
+        number_of_bytes_to_unlock_low: u32,
+        number_of_bytes_to_unlock_high: u32,
+        overlapped: *mut Overlapped,
+    ) -> i32;
 }
+
+// OVERLAPPED: same shape as `watch.rs`'s own private mirror of this struct
+// (`size_of` 32, `align_of` 8 on x86_64, already verified there against
+// mingw-w64's `minwinbase.h`) — duplicated locally per this crate's
+// per-module-locality convention for tiny FFI-mirror structs.
+// `LockFileEx`/`UnlockFileEx` require a non-NULL `OVERLAPPED` even for an
+// ordinary synchronous file handle, using it only to carry the 64-bit lock
+// offset (the `Offset`/`OffsetHigh` union members, here represented by
+// their union's widest `Pointer` variant, exactly like `watch.rs`'s own
+// `Overlapped`) rather than for actual overlapped I/O — a handle opened
+// without `FILE_FLAG_OVERLAPPED` still blocks synchronously until the lock
+// is granted, per `LockFileEx`'s own documented behavior.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct Overlapped {
+    internal: usize,
+    internal_high: usize,
+    pointer: *mut core::ffi::c_void,
+    h_event: RawHandle,
+}
+const _: () = assert!(core::mem::size_of::<Overlapped>() == 32);
+const _: () = assert!(core::mem::align_of::<Overlapped>() == 8);
+
+/// `LockFileEx`'s `dwFlags` bit requesting an exclusive (write) lock;
+/// without it, the lock is shared (read).
+const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x0000_0002;
 
 /// `MoveFileExW`'s `dwFlags` bit: overwrite `to` if it already exists
 /// (`MoveFileExW`'s own default refuses to, matching `rename`'s POSIX
@@ -401,6 +442,83 @@ pub unsafe fn stat_by_handle(handle: RawHandle) -> Result<FileInfoByHandle, Win3
         link_count: info.number_of_links,
         file_index: (u64::from(info.file_index_high) << 32) | u64::from(info.file_index_low),
     })
+}
+
+/// Advisory-lock a `length`-byte region of `handle` starting at `offset` —
+/// `LockFileEx`, the Windows analog of `flock` at the file level (an
+/// alternative to [`crate::handle::create_mutex`]'s named-mutex option for
+/// the same use case, e.g. guarding concurrent writes to a shared history
+/// file). `exclusive` requests a write lock; `false` requests a shared
+/// (read) lock. A handle opened without `FILE_FLAG_OVERLAPPED` blocks
+/// synchronously until the lock is granted, per `LockFileEx`'s own
+/// documented behavior.
+///
+/// # Safety
+///
+/// `handle` must be a currently-open, valid file handle.
+pub unsafe fn lock_file(
+    handle: RawHandle,
+    exclusive: bool,
+    offset: u64,
+    length: u64,
+) -> Result<(), Win32Error> {
+    let flags = if exclusive {
+        LOCKFILE_EXCLUSIVE_LOCK
+    } else {
+        0
+    };
+    let mut overlapped = Overlapped {
+        pointer: offset as usize as *mut core::ffi::c_void,
+        ..Overlapped::default()
+    };
+    // SAFETY: `handle` is caller-supplied per this function's own safety
+    // contract; `overlapped` is a valid, correctly-initialized out-pointer
+    // (its `Offset`/`OffsetHigh` union slot carries `offset`, per this
+    // call's own documented contract).
+    let ok = unsafe {
+        LockFileEx(
+            handle,
+            flags,
+            0,
+            (length & 0xFFFF_FFFF) as u32,
+            (length >> 32) as u32,
+            &mut overlapped,
+        )
+    };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
+/// Release a lock previously taken by [`lock_file`] over the same
+/// `offset`/`length` region of `handle` — `UnlockFileEx`.
+///
+/// # Safety
+///
+/// `handle` must be a currently-open, valid file handle.
+pub unsafe fn unlock_file(handle: RawHandle, offset: u64, length: u64) -> Result<(), Win32Error> {
+    let mut overlapped = Overlapped {
+        pointer: offset as usize as *mut core::ffi::c_void,
+        ..Overlapped::default()
+    };
+    // SAFETY: `handle` is caller-supplied per this function's own safety
+    // contract; `overlapped` is a valid, correctly-initialized out-pointer.
+    let ok = unsafe {
+        UnlockFileEx(
+            handle,
+            0,
+            (length & 0xFFFF_FFFF) as u32,
+            (length >> 32) as u32,
+            &mut overlapped,
+        )
+    };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
 }
 
 /// Copy `from` to `to` — `CopyFileW`, the primitive behind a `cp` builtin.
@@ -1146,5 +1264,61 @@ mod tests {
         assert_eq!(err, Win32Error::ERROR_FILE_NOT_FOUND);
 
         std::fs::remove_dir_all(&dir).expect("cleaning up the test directory should succeed");
+    }
+
+    #[test]
+    fn lock_file_then_unlock_file_round_trips() {
+        use std::os::windows::io::AsRawHandle;
+
+        let path = std::env::temp_dir().join("rusty_win32_fs_lock_file_test.txt");
+        std::fs::write(&path, b"0123456789").expect("writing the test file should succeed");
+
+        let file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("opening the test file should succeed");
+        let handle = file.as_raw_handle() as RawHandle;
+
+        // SAFETY: `handle` is a currently-open, valid file handle owned by
+        // `file` for the duration of this test.
+        unsafe { lock_file(handle, true, 0, 10) }.expect("LockFileEx should succeed");
+        // SAFETY: same handle, same region just locked above.
+        unsafe { unlock_file(handle, 0, 10) }.expect("UnlockFileEx should succeed");
+
+        drop(file);
+        std::fs::remove_file(&path).expect("cleaning up the test file should succeed");
+    }
+
+    #[test]
+    fn lock_file_allows_simultaneous_shared_locks_from_different_handles() {
+        use std::os::windows::io::AsRawHandle;
+
+        let path = std::env::temp_dir().join("rusty_win32_fs_lock_file_shared_test.txt");
+        std::fs::write(&path, b"0123456789").expect("writing the test file should succeed");
+
+        let file_a = std::fs::File::open(&path).expect("opening the test file should succeed");
+        let file_b = std::fs::File::open(&path)
+            .expect("opening a second handle to the test file should succeed");
+        let handle_a = file_a.as_raw_handle() as RawHandle;
+        let handle_b = file_b.as_raw_handle() as RawHandle;
+
+        // SAFETY: both handles are currently-open, valid file handles owned
+        // by `file_a`/`file_b` for the duration of this test.
+        unsafe { lock_file(handle_a, false, 0, 10) }
+            .expect("LockFileEx should succeed for the first shared lock");
+        unsafe { lock_file(handle_b, false, 0, 10) }.expect(
+            "LockFileEx should succeed for a second, simultaneous shared lock over the same region",
+        );
+
+        // SAFETY: same handles, same regions just locked above.
+        unsafe {
+            unlock_file(handle_a, 0, 10).unwrap();
+            unlock_file(handle_b, 0, 10).unwrap();
+        }
+
+        drop(file_a);
+        drop(file_b);
+        std::fs::remove_file(&path).expect("cleaning up the test file should succeed");
     }
 }
