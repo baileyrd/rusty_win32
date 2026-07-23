@@ -6,6 +6,21 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #231 — security: add initialize_acl/add_access_allowed_ace/add_access_denied_ace
+**2026-07-23** · [#231](https://github.com/baileyrd/rusty_win32/pull/231)
+
+- **Added:** `security::initialize_acl`/`security::add_access_allowed_ace`/
+  `security::add_access_denied_ace` (`InitializeAcl`/
+  `AddAccessAllowedAce`/`AddAccessDeniedAce`), closing issue #160 — the
+  lower-level, per-ACE alternative to PR #227's `build_acl` (which builds
+  a whole ACL at once via `SetEntriesInAclW`), useful for a brand-new
+  object's initial ACL. `initialize_acl` takes a caller-owned `&mut [u8]`
+  buffer and turns it into a fresh, empty `PACL` in place — no alignment
+  requirement on the buffer, since this module never reads an `Acl`'s
+  fields directly, always through `GetAclInformation`/`GetAce`.
+  `add_access_allowed_ace`/`add_access_denied_ace` then append one ACE at
+  a time onto that same buffer.
+
 ## PR #230 — security: add sid_to_string/string_to_sid
 **2026-07-23** · [#230](https://github.com/baileyrd/rusty_win32/pull/230)
 

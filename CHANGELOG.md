@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `security::initialize_acl`/`security::add_access_allowed_ace`/
+  `security::add_access_denied_ace` (`InitializeAcl`/
+  `AddAccessAllowedAce`/`AddAccessDeniedAce`) — the lower-level,
+  per-ACE alternative to `build_acl`'s all-at-once `SetEntriesInAclW`,
+  useful for building a brand-new object's initial ACL from scratch.
 - `security::sid_to_string`/`security::string_to_sid`
   (`ConvertSidToStringSidW`/`ConvertStringSidToSidW`) plus `ConvertedSid`
   (freeing via `LocalFree` on `Drop`) — the `S-1-5-...` string form of a
