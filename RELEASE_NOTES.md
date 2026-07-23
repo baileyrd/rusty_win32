@@ -6,6 +6,20 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #89 — process: add get_env_var/set_env_var (GetEnvironmentVariableW/SetEnvironmentVariableW)
+**2026-07-23** · [#89](https://github.com/baileyrd/rusty_win32/pull/89)
+
+- **Added:** `process::get_env_var`/`process::set_env_var` — live single-
+  variable environment access, closing issue #56 from the parity-loop sweep.
+  Complements `environment_snapshot`'s full-block read (issue #19): `export
+  NAME=value`/`unset NAME`/reading one `$VAR` need per-variable get/set, not
+  just a startup-time snapshot. `get_env_var` reports `Ok(None)` for an unset
+  variable (matching `path::search_path`'s "not found isn't an error"
+  convention) and handles `GetEnvironmentVariableW`'s documented quirk where
+  a set-but-empty variable also returns 0, distinguished from "not found"
+  only by `GetLastError` reporting success. `set_env_var`'s `value: None`
+  deletes the variable, per `SetEnvironmentVariableW`'s own contract.
+
 ## PR #88 — fs: add read_dir (FindFirstFileW/FindNextFileW/FindClose)
 **2026-07-23** · [#88](https://github.com/baileyrd/rusty_win32/pull/88)
 

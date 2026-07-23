@@ -109,6 +109,8 @@ unsafe extern "system" {
     ) -> i32;
     fn GetEnvironmentStringsW() -> *mut u16;
     fn FreeEnvironmentStringsW(penv: *mut u16) -> i32;
+    fn GetEnvironmentVariableW(name: *const u16, buffer: *mut u16, size: u32) -> u32;
+    fn SetEnvironmentVariableW(name: *const u16, value: *const u16) -> i32;
     fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> RawHandle;
     fn Process32FirstW(snapshot: RawHandle, entry: *mut ProcessEntry32W) -> i32;
     fn Process32NextW(snapshot: RawHandle, entry: *mut ProcessEntry32W) -> i32;
@@ -467,6 +469,75 @@ fn parse_environment_entry(
         alloc::string::String::from_utf16_lossy(&units[..equals_index]),
         alloc::string::String::from_utf16_lossy(&units[equals_index + 1..]),
     ))
+}
+
+fn to_wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(core::iter::once(0)).collect()
+}
+
+/// Read one live environment variable — `GetEnvironmentVariableW`, the
+/// single-variable counterpart to [`environment_snapshot`]'s full-block
+/// read. `Ok(None)` means the variable isn't set (`GetLastError() ==
+/// ERROR_ENVIRONMENT_VARIABLE_NOT_FOUND`), matching this crate's existing
+/// `search_path`-style "not found is not an error" convention rather than
+/// folding it into the `Err` case.
+pub fn get_env_var(name: &str) -> Result<Option<alloc::string::String>, Win32Error> {
+    let wide_name = to_wide(name);
+    let mut buf: Vec<u16> = alloc::vec![0u16; 256];
+    // At most two attempts: an initial try, then one retry sized exactly to
+    // whatever `GetEnvironmentVariableW` reports as actually required —
+    // matching `path::current_dir`'s own growing-buffer pattern.
+    for _ in 0..2 {
+        // SAFETY: `wide_name` is a valid, NUL-terminated UTF-16 string;
+        // `buf` is a valid, `buf.len()`-element writable buffer.
+        let needed = unsafe {
+            GetEnvironmentVariableW(wide_name.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
+        };
+        if needed == 0 {
+            let err = Win32Error::last();
+            return match err {
+                Win32Error::ERROR_ENVIRONMENT_VARIABLE_NOT_FOUND => Ok(None),
+                // Documented quirk: a variable that's set but empty also
+                // reports a 0 return, distinguished from "not found" only by
+                // `GetLastError` reporting success rather than actually
+                // failing.
+                Win32Error::SUCCESS => Ok(Some(alloc::string::String::new())),
+                err => Err(err),
+            };
+        }
+        if (needed as usize) > buf.len() {
+            buf.resize(needed as usize, 0);
+            continue;
+        }
+        return Ok(Some(alloc::string::String::from_utf16_lossy(
+            &buf[..needed as usize],
+        )));
+    }
+    Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
+}
+
+/// Write, or with `value: None`, delete one live environment variable —
+/// `SetEnvironmentVariableW`. Only affects the calling process's own
+/// environment block (and anything it spawns afterward without an explicit
+/// override); it has no effect on already-running processes or the
+/// environment a `spawn_suspended` child sees if that call's own
+/// `environment` argument overrides the block entirely.
+pub fn set_env_var(name: &str, value: Option<&str>) -> Result<(), Win32Error> {
+    let wide_name = to_wide(name);
+    let wide_value = value.map(to_wide);
+    let value_ptr = wide_value
+        .as_ref()
+        .map_or(core::ptr::null(), |v| v.as_ptr());
+    // SAFETY: `wide_name` is a valid, NUL-terminated UTF-16 string;
+    // `value_ptr` is either NULL (documented as "delete the variable") or a
+    // valid, NUL-terminated UTF-16 string from `wide_value`, kept alive for
+    // the duration of this call.
+    let ok = unsafe { SetEnvironmentVariableW(wide_name.as_ptr(), value_ptr) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
 }
 
 /// One entry from [`list_processes`]'s system-wide snapshot — a `ps`-row's
@@ -1023,6 +1094,28 @@ mod tests {
 
         // SAFETY: see above.
         unsafe { std::env::remove_var("RUSTY_WIN32_ENV_SNAPSHOT_TEST") };
+    }
+
+    #[test]
+    fn get_env_var_reports_none_for_an_unset_variable() {
+        let found = get_env_var("RUSTY_WIN32_THIS_VAR_SHOULD_NOT_EXIST")
+            .expect("GetEnvironmentVariableW should succeed even when the variable is unset");
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn set_env_var_then_get_env_var_round_trips() {
+        set_env_var("RUSTY_WIN32_ENV_VAR_TEST", Some("hello"))
+            .expect("SetEnvironmentVariableW should succeed");
+        let found = get_env_var("RUSTY_WIN32_ENV_VAR_TEST")
+            .expect("GetEnvironmentVariableW should succeed");
+        assert_eq!(found.as_deref(), Some("hello"));
+
+        set_env_var("RUSTY_WIN32_ENV_VAR_TEST", None)
+            .expect("SetEnvironmentVariableW should succeed deleting a variable");
+        let found_after_delete = get_env_var("RUSTY_WIN32_ENV_VAR_TEST")
+            .expect("GetEnvironmentVariableW should succeed");
+        assert_eq!(found_after_delete, None);
     }
 
     #[test]

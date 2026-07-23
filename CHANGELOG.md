@@ -40,6 +40,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `fs::read_dir` (`FindFirstFileW`/`FindNextFileW`/`FindClose`), a `ReadDir`
   iterator of `DirEntry` for listing a directory's contents — another
   parity-loop find.
+- `process::get_env_var`/`process::set_env_var`
+  (`GetEnvironmentVariableW`/`SetEnvironmentVariableW`), live single-variable
+  environment access to back `export`/`unset`/single-`$VAR` reads — another
+  parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
