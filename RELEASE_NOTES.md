@@ -9,6 +9,14 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 ## PR #198 — volume: add find_volumes (FindFirstVolumeW/FindNextVolumeW/FindVolumeClose)
 **2026-07-23** · [#198](https://github.com/baileyrd/rusty_win32/pull/198)
 
+- **Fixed:** a CI-caught race in
+  `process::tests::thread_exit_code_reports_still_active_then_the_real_code`
+  (added in PR #192): the process handle becoming signaled after
+  `TerminateProcess` doesn't guarantee `GetExitCodeThread` already
+  reflects the thread's final exit code — Windows doesn't document those
+  two transitions as atomic with each other. Fixed by opening the thread
+  handle with `SYNCHRONIZE` too and explicitly waiting on it (via
+  `handle::wait_single_ex`, PR #195) before reading the exit code.
 - **Added:** `volume::find_volumes` (`FindFirstVolumeW`/`FindNextVolumeW`/
   `FindVolumeClose`), closing issue #127 — enumerates every volume by its
   stable GUID path (`\\?\Volume{GUID}\`), independent of drive-letter
