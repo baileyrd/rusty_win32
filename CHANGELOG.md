@@ -48,6 +48,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   (`GetStdHandle`/`SetStdHandle`) plus the `STD_*_HANDLE` slot constants —
   the primitive `process.rs`'s own `spawn_suspended` doc comment already
   described but this crate didn't yet own; another parity-loop find.
+- `path::full_path` (`GetFullPathNameW`), resolving a relative path to its
+  absolute form — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

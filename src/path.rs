@@ -34,6 +34,12 @@ unsafe extern "system" {
     fn GetLongPathNameW(short_path: *const u16, long_path: *mut u16, buffer_length: u32) -> u32;
     fn GetCurrentDirectoryW(buffer_length: u32, buffer: *mut u16) -> u32;
     fn SetCurrentDirectoryW(path: *const u16) -> i32;
+    fn GetFullPathNameW(
+        file_name: *const u16,
+        buffer_length: u32,
+        buffer: *mut u16,
+        file_part: *mut *mut u16,
+    ) -> u32;
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -192,6 +198,43 @@ pub fn long_path(path: &str) -> Result<String, Win32Error> {
     Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
 }
 
+/// Resolve `path` (which may be relative, contain `.`/`..` components, or
+/// already be absolute) to its fully qualified absolute form —
+/// `GetFullPathNameW`. Unlike [`short_path`]/[`long_path`], `path` need not
+/// name an existing file or directory: this is purely lexical/working-
+/// directory-relative resolution, the same way `GetFullPathNameW` itself
+/// never touches the filesystem to check existence.
+pub fn full_path(path: &str) -> Result<String, Win32Error> {
+    let wide = to_wide(path);
+    let mut buf: Vec<u16> = alloc::vec![0u16; MAX_PATH];
+    // Same two-attempt growth pattern as `search_path`/`short_path`/`long_path`.
+    for _ in 0..2 {
+        // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; `buf` is
+        // a valid, `buf.len()`-element writable buffer; `file_part = NULL`
+        // is documented valid when the caller doesn't need the split-out
+        // file-name-component pointer.
+        let needed = unsafe {
+            GetFullPathNameW(
+                wide.as_ptr(),
+                buf.len() as u32,
+                buf.as_mut_ptr(),
+                core::ptr::null_mut(),
+            )
+        };
+        if needed == 0 {
+            return Err(Win32Error::last());
+        }
+        if (needed as usize) > buf.len() {
+            buf.resize(needed as usize, 0);
+            continue;
+        }
+        // Same excludes-the-NUL-on-success convention as
+        // `short_path`/`long_path`/`search_path`.
+        return Ok(String::from_utf16_lossy(&buf[..needed as usize]));
+    }
+    Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
+}
+
 /// The calling process's current working directory — `GetCurrentDirectoryW`,
 /// the actual Win32 primitive behind `cd`/`pwd`.
 pub fn current_dir() -> Result<String, Win32Error> {
@@ -330,5 +373,55 @@ mod tests {
     fn short_path_fails_for_a_nonexistent_path() {
         let err = short_path(r"C:\this-path-should-not-exist-rusty-win32-test").unwrap_err();
         assert_eq!(err, Win32Error::ERROR_FILE_NOT_FOUND);
+    }
+
+    #[test]
+    fn full_path_resolves_a_relative_path_against_the_current_directory() {
+        let system_root = std::env::var("SystemRoot")
+            .expect("SystemRoot should be set in any real Windows process's environment");
+        let original = current_dir().expect("GetCurrentDirectoryW should succeed");
+        set_current_dir(&system_root).expect("SetCurrentDirectoryW should succeed");
+
+        let resolved = full_path("System32").expect("GetFullPathNameW should succeed");
+
+        // Restore the original directory before any assertion that might
+        // panic and unwind past it, so this test doesn't leak process-global
+        // state into others.
+        set_current_dir(&original).expect("restoring the original directory should succeed");
+
+        assert!(
+            resolved.to_ascii_lowercase().ends_with("system32"),
+            "got: {resolved}"
+        );
+        assert!(
+            resolved
+                .to_ascii_lowercase()
+                .starts_with(&system_root.to_ascii_lowercase()),
+            "expected a path under {system_root:?}, got {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn full_path_resolves_dot_dot_components() {
+        let resolved = full_path(r"C:\Program Files\..\Program Files")
+            .expect("GetFullPathNameW should succeed");
+        assert!(
+            resolved.to_ascii_lowercase().ends_with("program files"),
+            "got: {resolved}"
+        );
+        assert!(!resolved.contains(".."), "got: {resolved}");
+    }
+
+    #[test]
+    fn full_path_succeeds_even_for_a_nonexistent_path() {
+        // `GetFullPathNameW` is purely lexical — it never touches the
+        // filesystem, unlike `short_path`/`long_path`, which require an
+        // existing entry.
+        let resolved = full_path(r"C:\this-path-should-not-exist-rusty-win32-test\foo.txt")
+            .expect("GetFullPathNameW should succeed even for a nonexistent path");
+        assert!(
+            resolved.to_ascii_lowercase().ends_with("foo.txt"),
+            "got: {resolved}"
+        );
     }
 }
