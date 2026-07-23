@@ -41,6 +41,8 @@ unsafe extern "system" {
         file_part: *mut *mut u16,
     ) -> u32;
     fn GetTempPathW(buffer_length: u32, buffer: *mut u16) -> u32;
+    fn GetSystemDirectoryW(buffer: *mut u16, buffer_length: u32) -> u32;
+    fn GetWindowsDirectoryW(buffer: *mut u16, buffer_length: u32) -> u32;
     fn GetTempFileNameW(
         path_name: *const u16,
         prefix_string: *const u16,
@@ -302,6 +304,53 @@ pub fn temp_path() -> Result<String, Win32Error> {
     Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
 }
 
+/// The Windows system directory (e.g. `C:\Windows\System32`, without a
+/// trailing backslash) — `GetSystemDirectoryW`, a standard
+/// well-known-location primitive, the Windows analog of resolving
+/// `/usr/bin`. No current `rush` feature asks for this; filed for Win32
+/// parity.
+pub fn system_directory() -> Result<String, Win32Error> {
+    let mut buf: Vec<u16> = alloc::vec![0u16; MAX_PATH];
+    // Same two-attempt growth pattern as `search_path`/`short_path`/
+    // `full_path`/`temp_path`.
+    for _ in 0..2 {
+        // SAFETY: `buf` is a valid, `buf.len()`-element writable buffer.
+        let needed = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) };
+        if needed == 0 {
+            return Err(Win32Error::last());
+        }
+        if (needed as usize) > buf.len() {
+            buf.resize(needed as usize, 0);
+            continue;
+        }
+        return Ok(String::from_utf16_lossy(&buf[..needed as usize]));
+    }
+    Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
+}
+
+/// The Windows directory (e.g. `C:\Windows`, without a trailing
+/// backslash) — `GetWindowsDirectoryW`, the other half of the standard
+/// well-known-location pair alongside [`system_directory`]. No current
+/// `rush` feature asks for this; filed for Win32 parity.
+pub fn windows_directory() -> Result<String, Win32Error> {
+    let mut buf: Vec<u16> = alloc::vec![0u16; MAX_PATH];
+    // Same two-attempt growth pattern as `search_path`/`short_path`/
+    // `full_path`/`temp_path`.
+    for _ in 0..2 {
+        // SAFETY: `buf` is a valid, `buf.len()`-element writable buffer.
+        let needed = unsafe { GetWindowsDirectoryW(buf.as_mut_ptr(), buf.len() as u32) };
+        if needed == 0 {
+            return Err(Win32Error::last());
+        }
+        if (needed as usize) > buf.len() {
+            buf.resize(needed as usize, 0);
+            continue;
+        }
+        return Ok(String::from_utf16_lossy(&buf[..needed as usize]));
+    }
+    Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
+}
+
 /// Generate a unique temporary file name under `dir`, starting with
 /// `prefix` (only its first 3 characters are used — `GetTempFileNameW`'s
 /// own documented truncation) — `GetTempFileNameW`. A real Windows quirk
@@ -491,6 +540,30 @@ mod tests {
             std::path::Path::new(&path).is_dir(),
             "the reported temp path should exist and be a directory, got: {path}"
         );
+    }
+
+    #[test]
+    fn system_directory_reports_an_existing_directory_under_the_windows_directory() {
+        let system_root = std::env::var("SystemRoot")
+            .expect("SystemRoot should be set in any real Windows process's environment");
+        let dir = system_directory().expect("GetSystemDirectoryW should succeed");
+        assert!(
+            std::path::Path::new(&dir).is_dir(),
+            "the reported system directory should exist and be a directory, got: {dir}"
+        );
+        assert!(
+            dir.to_ascii_lowercase()
+                .starts_with(&system_root.to_ascii_lowercase()),
+            "expected the system directory under {system_root:?}, got {dir:?}"
+        );
+    }
+
+    #[test]
+    fn windows_directory_matches_the_real_environment_systemroot() {
+        let system_root = std::env::var("SystemRoot")
+            .expect("SystemRoot should be set in any real Windows process's environment");
+        let dir = windows_directory().expect("GetWindowsDirectoryW should succeed");
+        assert_eq!(dir.to_ascii_lowercase(), system_root.to_ascii_lowercase());
     }
 
     #[test]
