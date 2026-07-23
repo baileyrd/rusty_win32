@@ -166,6 +166,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `pipe::pipe_info` (`GetNamedPipeInfo`) plus a new `PipeInfo` struct, the
   read-side counterpart to `pipe::create_server`'s creation-time
   parameters — another round-2 item.
+- `pipe::transact`/`pipe::call` (`TransactNamedPipe`/`CallNamedPipeW`),
+  one-shot message-mode pipe transactions for a simple request-response
+  protocol — another round-2 item.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

@@ -6,6 +6,40 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #203 — pipe: add transact/call (TransactNamedPipe/CallNamedPipeW)
+**2026-07-23** · [#203](https://github.com/baileyrd/rusty_win32/pull/203)
+
+- **Added:** `pipe::transact`/`pipe::call` (`TransactNamedPipe`/
+  `CallNamedPipeW`), closing issue #132 — one-shot message-mode pipe
+  transactions (write-then-read in a single call) for a simple
+  request-response protocol; `call` additionally combines
+  `wait_for_server`/`open_client`/`transact`/close for a caller that only
+  needs one round trip. Another round-2 "weak/no clear consumer" item
+  (`gap-analysis.md`); no current `rush` feature asks for this.
+- **Fixed:** a real CI hang (not a fast failure) in this PR's own new
+  tests: `transact`/`call`'s pipe was created with `PIPE_READMODE_BYTE`
+  even though `PIPE_TYPE_MESSAGE` was set, and `TransactNamedPipe`/
+  `CallNamedPipeW` are fully synchronous with no timeout — a read/write
+  mode mismatch left the call blocked forever instead of erroring.
+  Switched both new tests' pipes to `PIPE_READMODE_MESSAGE`. Caught by an
+  abnormally long `windows-latest` CI run (~25 min vs. this workflow's
+  usual ~1 min), cancelled and re-run after the fix.
+- **Fixed:** the same two tests still hung a second `windows-latest` run
+  after the fix above (~21 min), confirming the deadlock risk wasn't
+  fully understood. Rather than guess a third specific cause, both tests
+  now run their server/client halves on independent threads
+  communicating over a channel with a 10-second `recv_timeout`, instead
+  of a plain `.join()` with no bound — a real deadlock now fails the test
+  in ~10s with a clear message instead of hanging the whole CI job again.
+- **Fixed:** the watchdog above then reported the real root cause in
+  ~11s — `TransactNamedPipe` failed with a genuine `ERROR_BAD_PIPE`
+  (230), not a hang. The `call` test passed, isolating the bug to
+  `transact`: a freshly-opened client handle defaults to *byte* read
+  mode regardless of the server's creation-time `dwPipeMode` —
+  `TransactNamedPipe` specifically requires the *calling handle itself*
+  to be in message read mode. Fixed by calling `set_pipe_mode` on the
+  client (switching it to `PIPE_READMODE_MESSAGE`) before `transact`.
+
 ## PR #202 — pipe: add pipe_info (GetNamedPipeInfo)
 **2026-07-23** · [#202](https://github.com/baileyrd/rusty_win32/pull/202)
 
