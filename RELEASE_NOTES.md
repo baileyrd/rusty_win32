@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #210 — console: add window_handle (GetConsoleWindow)
+**2026-07-23** · [#210](https://github.com/baileyrd/rusty_win32/pull/210)
+
+- **Added:** `console::window_handle` (`GetConsoleWindow`), closing issue
+  #139 — the `HWND` of the console window attached to the calling
+  process, if any (`None` for a headless/service process). Manipulating
+  the window itself via ordinary `user32` window APIs is out of this
+  crate's scope beyond returning the handle. Another round-2 "weak/no
+  clear consumer" item (`gap-analysis.md`); no current `rush` feature
+  asks for this.
+
 ## PR #209 — console: add process_list (GetConsoleProcessList)
 **2026-07-23** · [#209](https://github.com/baileyrd/rusty_win32/pull/209)
 

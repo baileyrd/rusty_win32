@@ -191,6 +191,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `console::process_list` (`GetConsoleProcessList`), the pids of every
   process attached to the calling process's console — another round-2
   item.
+- `console::window_handle` (`GetConsoleWindow`), the `HWND` of the console
+  window attached to the calling process, if any — another round-2 item.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

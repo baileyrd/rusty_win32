@@ -77,6 +77,7 @@ unsafe extern "system" {
     fn FlushConsoleInputBuffer(console_input: RawHandle) -> i32;
     fn GetNumberOfConsoleInputEvents(console_input: RawHandle, number_of_events: *mut u32) -> i32;
     fn GetConsoleProcessList(process_list: *mut u32, process_count: u32) -> u32;
+    fn GetConsoleWindow() -> *mut core::ffi::c_void;
     fn WaitForSingleObject(handle: RawHandle, milliseconds: u32) -> u32;
     fn WriteConsoleInputW(
         console_input: RawHandle,
@@ -704,6 +705,22 @@ pub fn process_list() -> Result<alloc::vec::Vec<u32>, Win32Error> {
     Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
 }
 
+/// The `HWND` of the console window attached to the calling process, if
+/// any — `GetConsoleWindow`. `None` for a process with no console window
+/// (e.g. a headless/service process). Manipulating the window itself
+/// (position/focus/etc.) via ordinary `user32` window APIs is out of this
+/// crate's scope beyond returning the handle. No `Result`: `GetConsoleWindow`
+/// has no documented failure mode beyond the `None` case itself, matching
+/// this crate's already-established "never fails" pattern (e.g.
+/// `GetDriveTypeW`). No current `rush` feature asks for this; filed for
+/// Win32 parity.
+pub fn window_handle() -> Option<*mut core::ffi::c_void> {
+    // SAFETY: `GetConsoleWindow` takes no arguments and has no
+    // precondition.
+    let hwnd = unsafe { GetConsoleWindow() };
+    if hwnd.is_null() { None } else { Some(hwnd) }
+}
+
 /// Synthesize `text` as a sequence of real console key events —
 /// `WriteConsoleInputW`, the standard, documented technique console
 /// automation tools use to inject keystrokes (queues `INPUT_RECORD`s into
@@ -1114,6 +1131,15 @@ mod tests {
         assert!(
             pids.contains(&crate::process::current_pid()),
             "the calling process should be attached to its own console, got: {pids:?}"
+        );
+    }
+
+    #[test]
+    fn window_handle_returns_a_non_null_handle_once_a_console_exists() {
+        let _ = ensure_console_stdin(); // guarantee a console exists first
+        assert!(
+            window_handle().is_some(),
+            "GetConsoleWindow should report a real HWND once this process has a console"
         );
     }
 
