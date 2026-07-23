@@ -828,7 +828,11 @@ mod tests {
 
     #[test]
     fn read_dir_fails_for_a_nonexistent_directory() {
+        // The parent directory itself is missing, so `FindFirstFileW` reports
+        // `ERROR_PATH_NOT_FOUND`, not `ERROR_FILE_NOT_FOUND` (that one's
+        // reserved for an existing directory with no entries matching the
+        // pattern).
         let err = read_dir(r"C:\this-directory-should-not-exist-rusty-win32-test\*").unwrap_err();
-        assert_eq!(err, Win32Error::ERROR_FILE_NOT_FOUND);
+        assert_eq!(err, Win32Error::ERROR_PATH_NOT_FOUND);
     }
 }
