@@ -135,6 +135,7 @@ win32_errors! {
     ERROR_NOT_SUPPORTED = 50 => "the request is not supported",
     ERROR_FILE_EXISTS = 80 => "the file exists",
     ERROR_INVALID_PARAMETER = 87 => "the parameter is incorrect",
+    ERROR_BUFFER_OVERFLOW = 111 => "the file name is too long",
     ERROR_BROKEN_PIPE = 109 => "the pipe has been ended",
     ERROR_CALL_NOT_IMPLEMENTED = 120 => "this function is not supported on this system",
     ERROR_INSUFFICIENT_BUFFER = 122 => "the data area passed to a system call is too small",

@@ -103,6 +103,7 @@ unsafe extern "system" {
     fn GetProcessId(process: RawHandle) -> u32;
     fn Sleep(milliseconds: u32);
     fn GetSystemInfo(system_info: *mut SystemInfo);
+    fn GetComputerNameW(buffer: *mut u16, size: *mut u32) -> i32;
     fn QueryFullProcessImageNameW(
         process: RawHandle,
         flags: u32,
@@ -927,6 +928,35 @@ pub fn logical_processor_count() -> u32 {
     info.number_of_processors
 }
 
+/// This machine's NetBIOS computer name — `GetComputerNameW`, the primitive
+/// behind `$HOSTNAME`, a shell prompt, or a `hostname` builtin.
+pub fn computer_name() -> Result<alloc::string::String, Win32Error> {
+    let mut buf: Vec<u16> = alloc::vec![0u16; 256];
+    // At most two attempts: an initial try, then one retry sized exactly to
+    // whatever `GetComputerNameW` reports as actually required —
+    // `ERROR_BUFFER_OVERFLOW`'s documented failure mode updates `size`
+    // in-place to the exact required length (including the terminating
+    // NUL), unlike this crate's other growing-buffer calls, which only
+    // ever report a lower bound.
+    for _ in 0..2 {
+        let mut size = buf.len() as u32;
+        // SAFETY: `buf` is a valid, `buf.len()`-element writable buffer;
+        // `size` is a valid in/out pointer set to that same length.
+        let ok = unsafe { GetComputerNameW(buf.as_mut_ptr(), &mut size) };
+        if ok != 0 {
+            return Ok(alloc::string::String::from_utf16_lossy(
+                &buf[..size as usize],
+            ));
+        }
+        let err = Win32Error::last();
+        if err != Win32Error::ERROR_BUFFER_OVERFLOW {
+            return Err(err);
+        }
+        buf.resize(size as usize, 0);
+    }
+    Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1377,6 +1407,17 @@ mod tests {
         assert!(
             logical_processor_count() > 0,
             "every real machine has at least one logical processor"
+        );
+    }
+
+    #[test]
+    fn computer_name_matches_the_real_environment_computername() {
+        let name = computer_name().expect("GetComputerNameW should succeed");
+        let env_name = std::env::var("COMPUTERNAME")
+            .expect("COMPUTERNAME should be set in any real Windows process's environment");
+        assert!(
+            name.eq_ignore_ascii_case(&env_name),
+            "expected {env_name:?}, got {name:?}"
         );
     }
 }
