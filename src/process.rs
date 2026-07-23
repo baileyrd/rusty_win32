@@ -109,6 +109,14 @@ unsafe extern "system" {
         buffer: *mut SystemLogicalProcessorInformationRaw,
         return_length: *mut u32,
     ) -> i32;
+    fn AddVectoredExceptionHandler(
+        first_handler: u32,
+        handler: VectoredExceptionHandler,
+    ) -> *mut core::ffi::c_void;
+    fn RemoveVectoredExceptionHandler(handle: *mut core::ffi::c_void) -> u32;
+    fn SetUnhandledExceptionFilter(
+        filter: Option<TopLevelExceptionFilter>,
+    ) -> Option<TopLevelExceptionFilter>;
     fn GetComputerNameW(buffer: *mut u16, size: *mut u32) -> i32;
     fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
     fn SetErrorMode(mode: u32) -> u32;
@@ -1262,6 +1270,102 @@ pub fn logical_processor_information() -> Result<Vec<LogicalProcessorInformation
         .collect())
 }
 
+/// `PEXCEPTION_POINTERS` — the argument passed to a
+/// [`VectoredExceptionHandler`]/[`TopLevelExceptionFilter`], carrying raw
+/// pointers to the exception record and CPU register context. Neither
+/// pointee is decoded by this crate (`EXCEPTION_RECORD` has a
+/// variable-length trailing argument array; `CONTEXT` is a large,
+/// architecture-specific register dump) — a handler that needs them reads
+/// through the raw pointers itself.
+#[repr(C)]
+pub struct ExceptionPointers {
+    pub exception_record: *mut core::ffi::c_void,
+    pub context_record: *mut core::ffi::c_void,
+}
+
+/// A vectored exception handler — see [`add_vectored_exception_handler`].
+pub type VectoredExceptionHandler =
+    extern "system" fn(exception_info: *mut ExceptionPointers) -> i32;
+
+/// A process's top-level (unhandled-exception) filter — see
+/// [`set_unhandled_exception_filter`].
+pub type TopLevelExceptionFilter =
+    extern "system" fn(exception_info: *mut ExceptionPointers) -> i32;
+
+/// A [`VectoredExceptionHandler`]/[`TopLevelExceptionFilter`] return value:
+/// resume execution at the point the exception occurred — only valid if
+/// the handler actually fixed the condition that faulted.
+pub const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
+/// Pass the exception to the next handler in the chain (or, for a
+/// top-level filter, to Windows' own default handling).
+pub const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
+/// (Top-level filter only.) Let Windows execute its default
+/// unhandled-exception handling — typically terminating the process,
+/// after this filter itself has already run (e.g. to log the crash).
+pub const EXCEPTION_EXECUTE_HANDLER: i32 = 1;
+
+/// Register `handler` on the process-wide vectored-exception-handler
+/// chain — `AddVectoredExceptionHandler`, the closest Windows analog to
+/// installing a Unix `SIGSEGV`/`SIGABRT` handler. Runs for *every*
+/// exception in the process, before structured exception handling
+/// (`__try`/`__except`, which this crate has no Rust equivalent of) gets a
+/// chance. `first` requests this handler run before any already-installed
+/// ones (`true`) or after (`false`). Returns an opaque handle for
+/// [`remove_vectored_exception_handler`] — not the same as `handler`
+/// itself, since Windows doesn't guarantee pointer-identity removal here
+/// the way `SetConsoleCtrlHandler` does. No current `rush` feature asks
+/// for this; filed for Win32 parity.
+pub fn add_vectored_exception_handler(
+    first: bool,
+    handler: VectoredExceptionHandler,
+) -> Result<*mut core::ffi::c_void, Win32Error> {
+    // SAFETY: `handler` is a `'static` function pointer of the exact
+    // signature `AddVectoredExceptionHandler` requires; `first` is a plain
+    // flag, not a pointer.
+    let handle = unsafe { AddVectoredExceptionHandler(u32::from(first), handler) };
+    if handle.is_null() {
+        Err(Win32Error::last())
+    } else {
+        Ok(handle)
+    }
+}
+
+/// Unregister a handler previously added by
+/// [`add_vectored_exception_handler`], by the handle it returned —
+/// `RemoveVectoredExceptionHandler`.
+///
+/// # Safety
+///
+/// `handle` must be a value [`add_vectored_exception_handler`] returned,
+/// not yet removed.
+pub unsafe fn remove_vectored_exception_handler(
+    handle: *mut core::ffi::c_void,
+) -> Result<(), Win32Error> {
+    // SAFETY: `handle` is caller-supplied per this function's own safety
+    // contract, expected to be a value this module's own
+    // `add_vectored_exception_handler` returned.
+    let ok = unsafe { RemoveVectoredExceptionHandler(handle) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
+/// Install `filter` as the process's top-level (unhandled-exception)
+/// filter — `SetUnhandledExceptionFilter`, the last resort before
+/// Windows' own default crash handling runs. Pass `None` to restore the
+/// default handling. Returns whatever filter was previously installed
+/// (`None` if none was). No current `rush` feature asks for this; filed
+/// for Win32 parity.
+pub fn set_unhandled_exception_filter(
+    filter: Option<TopLevelExceptionFilter>,
+) -> Option<TopLevelExceptionFilter> {
+    // SAFETY: `filter` (if any) is a `'static` function pointer of the
+    // exact signature `SetUnhandledExceptionFilter` requires.
+    unsafe { SetUnhandledExceptionFilter(filter) }
+}
+
 /// This machine's NetBIOS computer name — `GetComputerNameW`, the primitive
 /// behind `$HOSTNAME`, a shell prompt, or a `hostname` builtin.
 pub fn computer_name() -> Result<alloc::string::String, Win32Error> {
@@ -2015,6 +2119,61 @@ mod tests {
                 "every entry's processor mask should cover at least one CPU"
             );
         }
+    }
+
+    #[test]
+    fn add_vectored_exception_handler_intercepts_a_raised_exception() {
+        // A custom, application-defined exception code (the documented
+        // `0xE0000000`-`0xEFFFFFFF` range) that this test raises itself
+        // via `RaiseException` — a safe, deterministic way to exercise a
+        // handler without triggering a real CPU fault. Declared locally
+        // (not a public wrapper) since raising exceptions isn't part of
+        // this issue's scope, only handling them.
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn RaiseException(
+                exception_code: u32,
+                exception_flags: u32,
+                number_of_arguments: u32,
+                arguments: *const usize,
+            );
+        }
+        const TEST_EXCEPTION_CODE: u32 = 0xE0AA_0001;
+        static CAUGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+        extern "system" fn handler(exception_info: *mut ExceptionPointers) -> i32 {
+            // SAFETY: Windows always passes a valid, non-null pointer to
+            // a registered vectored exception handler; `ExceptionRecord`
+            // is the first field of the real `EXCEPTION_RECORD` struct
+            // (`ExceptionCode`, a `DWORD`), always readable at offset 0
+            // regardless of the rest of that struct's (unmodeled) layout.
+            let code = unsafe { *(*exception_info).exception_record.cast::<u32>() };
+            if code == TEST_EXCEPTION_CODE {
+                CAUGHT.store(true, std::sync::atomic::Ordering::SeqCst);
+                EXCEPTION_CONTINUE_EXECUTION
+            } else {
+                EXCEPTION_CONTINUE_SEARCH
+            }
+        }
+
+        let vectored_handle = add_vectored_exception_handler(true, handler)
+            .expect("AddVectoredExceptionHandler should succeed");
+
+        // SAFETY: a made-up, non-fatal application exception code with no
+        // arguments; `handler` above returns `EXCEPTION_CONTINUE_EXECUTION`
+        // for it, so `RaiseException` returns normally instead of crashing
+        // this test process.
+        unsafe { RaiseException(TEST_EXCEPTION_CODE, 0, 0, core::ptr::null()) };
+
+        assert!(
+            CAUGHT.load(std::sync::atomic::Ordering::SeqCst),
+            "the installed vectored handler should have intercepted the raised exception"
+        );
+
+        // SAFETY: `vectored_handle` is the value `add_vectored_exception_handler`
+        // returned above, not yet removed.
+        unsafe { remove_vectored_exception_handler(vectored_handle) }
+            .expect("RemoveVectoredExceptionHandler should succeed");
     }
 
     #[test]

@@ -183,6 +183,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   plus `LogicalProcessorInformation`/`ProcessorRelationship`, detailed CPU
   topology beyond `process::logical_processor_count`'s single number —
   another round-2 item.
+- `process::add_vectored_exception_handler`/`remove_vectored_exception_handler`
+  (`AddVectoredExceptionHandler`/`RemoveVectoredExceptionHandler`) and
+  `process::set_unhandled_exception_filter` (`SetUnhandledExceptionFilter`),
+  structured-exception-handling hooks — the closest Windows analog to
+  installing a Unix `SIGSEGV`/`SIGABRT` handler — another round-2 item.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
