@@ -159,7 +159,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   Windows SDK versions' `kernel32.lib` omits a static stub for this
   symbol even though it's a real, always-present `kernel32.dll` export,
   which fails to link (caught by CI on this crate's own `windows-latest`
-  runner) rather than just failing at runtime.
+  runner) rather than just failing at runtime. Also falls back to
+  `KernelBase.dll` (where the function is actually implemented) if
+  `GetProcAddress` against `kernel32.dll` alone doesn't resolve it — a
+  second CI-caught gap on the same runner.
+- `pipe::pipe_info` (`GetNamedPipeInfo`) plus a new `PipeInfo` struct, the
+  read-side counterpart to `pipe::create_server`'s creation-time
+  parameters — another round-2 item.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
