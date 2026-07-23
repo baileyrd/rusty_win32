@@ -122,6 +122,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `fs::lock_file`/`fs::unlock_file` (`LockFileEx`/`UnlockFileEx`), advisory
   file-level locking — the last of the 32 parity-loop finds from
   `gap-analysis.md`.
+- `process::affinity`/`process::set_affinity` (`GetProcessAffinityMask`/
+  `SetProcessAffinityMask`), the Windows analog of `sched_getaffinity`/
+  `taskset` — first of the round-2 "weak/no clear consumer" items added per
+  explicit direction (`gap-analysis.md`), not because any consumer currently
+  wants it.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
