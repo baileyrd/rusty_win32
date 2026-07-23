@@ -86,6 +86,7 @@ unsafe extern "system" {
         milliseconds: u32,
         alertable: i32,
     ) -> u32;
+    fn CompareObjectHandles(first: RawHandle, second: RawHandle) -> i32;
 }
 
 /// `INFINITE` — `WaitForSingleObjectEx`/`WaitForMultipleObjectsEx`'s
@@ -575,6 +576,23 @@ pub unsafe fn signal_and_wait(
     }
 }
 
+/// Ask Windows directly whether `first` and `second` refer to the same
+/// kernel object — `CompareObjectHandles`, the documented-correct
+/// alternative to comparing raw handle values, which isn't guaranteed
+/// reliable (a handle value can be reused after its object is closed, and
+/// two distinct handle values can validly refer to the same object, e.g.
+/// via [`duplicate`]). No `Result`: this call has no documented failure
+/// mode beyond the boolean answer itself.
+///
+/// # Safety
+///
+/// `first` and `second` must each be a currently-open, valid handle.
+pub unsafe fn same_object(first: RawHandle, second: RawHandle) -> bool {
+    // SAFETY: both handles are caller-supplied per this function's own
+    // safety contract.
+    unsafe { CompareObjectHandles(first, second) != 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -923,6 +941,35 @@ mod tests {
         unsafe {
             close(to_signal).unwrap();
             close(to_wait_on).unwrap();
+        }
+    }
+
+    #[test]
+    fn same_object_distinguishes_a_duplicate_from_an_unrelated_handle() {
+        let original = create_mutex(None, false).expect("CreateMutexW should succeed");
+        // SAFETY: `original` is a freshly created, valid handle.
+        let duplicated =
+            unsafe { duplicate(original, false) }.expect("DuplicateHandle should succeed");
+        let unrelated = create_mutex(None, false).expect("CreateMutexW should succeed");
+
+        // SAFETY: `original`/`duplicated` are both valid, currently-open
+        // handles; this is the operation under test.
+        assert!(
+            unsafe { same_object(original, duplicated) },
+            "a duplicated handle should refer to the same object as the original"
+        );
+        // SAFETY: `original`/`unrelated` are both valid, currently-open
+        // handles.
+        assert!(
+            !unsafe { same_object(original, unrelated) },
+            "two independently created mutexes should not be the same object"
+        );
+
+        // SAFETY: every handle here is valid and each closed exactly once.
+        unsafe {
+            close(original).unwrap();
+            close(duplicated).unwrap();
+            close(unrelated).unwrap();
         }
     }
 }

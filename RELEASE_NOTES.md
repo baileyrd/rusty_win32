@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #201 — handle: add same_object (CompareObjectHandles)
+**2026-07-23** · [#201](https://github.com/baileyrd/rusty_win32/pull/201)
+
+- **Added:** `handle::same_object` (`CompareObjectHandles`), closing issue
+  #130 — the documented-correct way to ask Windows whether two handle
+  values refer to the same kernel object, since comparing raw handle
+  values isn't guaranteed reliable (values get reused, and `duplicate`
+  can validly produce a second value for the same object). Another
+  round-2 "weak/no clear consumer" item (`gap-analysis.md`); no current
+  `rush` feature asks for this.
+
 ## PR #200 — fs: add compressed_file_size (GetCompressedFileSizeW)
 **2026-07-23** · [#200](https://github.com/baileyrd/rusty_win32/pull/200)
 
