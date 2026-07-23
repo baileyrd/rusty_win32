@@ -106,6 +106,8 @@ unsafe extern "system" {
     fn GetComputerNameW(buffer: *mut u16, size: *mut u32) -> i32;
     fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
     fn SetErrorMode(mode: u32) -> u32;
+    fn GetPriorityClass(process: RawHandle) -> u32;
+    fn SetPriorityClass(process: RawHandle, priority_class: u32) -> i32;
     fn QueryFullProcessImageNameW(
         process: RawHandle,
         flags: u32,
@@ -1058,6 +1060,68 @@ pub fn set_error_mode(mode: u32) -> u32 {
     unsafe { SetErrorMode(mode) }
 }
 
+/// `GetPriorityClass`/`SetPriorityClass`'s scheduling priority class:
+/// below the system default — the Windows analog of a positive `nice`
+/// value.
+pub const IDLE_PRIORITY_CLASS: u32 = 0x0000_0040;
+/// Slightly below the system default.
+pub const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+/// The system default scheduling priority — the Windows analog of `nice`'s
+/// default (`0`).
+pub const NORMAL_PRIORITY_CLASS: u32 = 0x0000_0020;
+/// Slightly above the system default.
+pub const ABOVE_NORMAL_PRIORITY_CLASS: u32 = 0x0000_8000;
+/// Above the system default — the Windows analog of a negative `nice`
+/// value.
+pub const HIGH_PRIORITY_CLASS: u32 = 0x0000_0080;
+/// The highest possible priority; can starve system threads and
+/// destabilize the machine if misused, the same caution Unix's own
+/// highest-priority `nice` values carry.
+pub const REALTIME_PRIORITY_CLASS: u32 = 0x0000_0100;
+
+/// `process`'s scheduling priority class (one of the `*_PRIORITY_CLASS`
+/// constants above) — `GetPriorityClass`, the Windows analog of `nice`'s
+/// read side.
+///
+/// # Safety
+///
+/// `process` must be a currently-open, valid process handle.
+pub unsafe fn priority_class(process: RawHandle) -> Result<u32, Win32Error> {
+    // SAFETY: `process` is caller-supplied per this function's own safety
+    // contract; `GetPriorityClass` reports a failing handle as an ordinary
+    // `0`/`GetLastError` failure, not undefined behavior.
+    let class = unsafe { GetPriorityClass(process) };
+    if class == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(class)
+    }
+}
+
+/// Set `process`'s scheduling priority class — `SetPriorityClass`, the
+/// Windows analog of `renice`. `priority_class` is the raw
+/// `*_PRIORITY_CLASS` bitmask above — this function is a thin, policy-free
+/// wrapper, the same as this crate's other raw bitmask parameters. No
+/// current `rush` feature asks for this, but it's the natural primitive if
+/// a `nice`/`renice`-style feature is ever added.
+///
+/// # Safety
+///
+/// `process` must be a currently-open, valid process handle.
+pub unsafe fn set_priority_class(
+    process: RawHandle,
+    priority_class: u32,
+) -> Result<(), Win32Error> {
+    // SAFETY: `process` is caller-supplied per this function's own safety
+    // contract; `priority_class` is a plain value, not a pointer.
+    let ok = unsafe { SetPriorityClass(process, priority_class) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1552,5 +1616,41 @@ mod tests {
             previous, SEM_FAILCRITICALERRORS,
             "SetErrorMode should return the mode just set by the prior call"
         );
+    }
+
+    #[test]
+    fn set_priority_class_then_priority_class_round_trips() {
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known system binary.
+        let spawned = unsafe { spawn_suspended("cmd.exe /c exit 0", false, false, None) }
+            .expect("CreateProcessW should succeed");
+
+        // SAFETY: `spawned.process` is a freshly created, valid handle.
+        unsafe { set_priority_class(spawned.process, IDLE_PRIORITY_CLASS) }
+            .expect("SetPriorityClass should succeed");
+        // SAFETY: same handle.
+        let class =
+            unsafe { priority_class(spawned.process) }.expect("GetPriorityClass should succeed");
+        assert_eq!(class, IDLE_PRIORITY_CLASS);
+
+        // SAFETY: same handle.
+        unsafe { set_priority_class(spawned.process, NORMAL_PRIORITY_CLASS) }
+            .expect("SetPriorityClass should succeed");
+        // SAFETY: same handle.
+        let class =
+            unsafe { priority_class(spawned.process) }.expect("GetPriorityClass should succeed");
+        assert_eq!(class, NORMAL_PRIORITY_CLASS);
+
+        // SAFETY: `spawned.thread` is freshly created, valid, not yet
+        // resumed.
+        unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
+        // SAFETY: `spawned.process` is a valid, currently-open handle.
+        unsafe { wait(spawned.process, None) }.unwrap();
+
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+        }
     }
 }

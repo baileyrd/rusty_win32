@@ -106,6 +106,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `path::temp_path`/`path::temp_file_name`
   (`GetTempPathW`/`GetTempFileNameW`), for heredoc scratch files or a
   `mktemp` builtin — another parity-loop find.
+- `process::priority_class`/`process::set_priority_class`
+  (`GetPriorityClass`/`SetPriorityClass`) plus the `*_PRIORITY_CLASS`
+  constants, the Windows analog of `nice`/`renice` — another parity-loop
+  find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
