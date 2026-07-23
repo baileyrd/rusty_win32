@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #116 — pipe: add set_pipe_mode (SetNamedPipeHandleState)
+**2026-07-23** · [#116](https://github.com/baileyrd/rusty_win32/pull/116)
+
+- **Added:** `pipe::set_pipe_mode` (`SetNamedPipeHandleState`), closing
+  issue #83 from the parity-loop sweep — exposes the raw
+  `PIPE_NOWAIT`/`PIPE_READMODE_*` bits `pipe.rs` already defines, covering
+  two things at once: switching between byte/message read mode after
+  creation, and `PIPE_NOWAIT`, the named-pipe equivalent of the
+  non-blocking check `handle::pipe_bytes_available` (`PeekNamedPipe`)
+  already gives anonymous pipes.
+
 ## PR #115 — process: add list_threads/open_thread/suspend_thread (Thread32First/Thread32Next/OpenThread/SuspendThread)
 **2026-07-23** · [#115](https://github.com/baileyrd/rusty_win32/pull/115)
 
