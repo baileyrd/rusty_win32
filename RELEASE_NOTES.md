@@ -6,6 +6,16 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #205 — process: add tick_count (GetTickCount64)
+**2026-07-23** · [#205](https://github.com/baileyrd/rusty_win32/pull/205)
+
+- **Added:** `process::tick_count` (`GetTickCount64`), closing issue #134
+  — milliseconds elapsed since the system started, a coarser, simpler
+  monotonic counter alongside `time::now_monotonic`'s
+  `QueryPerformanceCounter`-backed high-resolution one. Another round-2
+  "weak/no clear consumer" item (`gap-analysis.md`); no current `rush`
+  feature asks for this.
+
 ## PR #204 — job: add open_by_name (OpenJobObjectW)
 **2026-07-23** · [#204](https://github.com/baileyrd/rusty_win32/pull/204)
 
