@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `registry::delete_key` (`RegDeleteKeyExW`) plus `KEY_WOW64_64KEY`/
+  `KEY_WOW64_32KEY` — remove a leaf subkey (must have no subkeys of its
+  own). Earlier registry tests now clean up the keys they create, now
+  that this exists to do it.
 - `registry::delete_value` (`RegDeleteValueW`) — remove one named value
   under an open key, without touching the key itself or its other
   values/subkeys.

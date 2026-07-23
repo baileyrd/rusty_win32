@@ -6,6 +6,18 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #219 — registry: add delete_key
+**2026-07-23** · [#219](https://github.com/baileyrd/rusty_win32/pull/219)
+
+- **Added:** `registry::delete_key` (`RegDeleteKeyExW`) plus
+  `KEY_WOW64_64KEY`/`KEY_WOW64_32KEY`, closing issue #148 — remove a leaf
+  subkey (Windows refuses to delete a key that still has subkeys of its
+  own, the same restriction `rmdir` has for a non-empty directory). The
+  earlier `create_key`/`set_value`/`delete_value` tests now also clean up
+  the subkeys they create, now that `delete_key` exists to do it — the
+  registry litter those tests previously left behind (deliberately, since
+  no `delete_key` existed yet) is now closed out.
+
 ## PR #218 — registry: add delete_value
 **2026-07-23** · [#218](https://github.com/baileyrd/rusty_win32/pull/218)
 
