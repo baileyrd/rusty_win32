@@ -140,6 +140,7 @@ win32_errors! {
     ERROR_INSUFFICIENT_BUFFER = 122 => "the data area passed to a system call is too small",
     ERROR_INVALID_NAME = 123 => "the filename, directory name, or volume label syntax is incorrect",
     ERROR_ALREADY_EXISTS = 183 => "cannot create a file when that file already exists",
+    ERROR_ENVIRONMENT_VARIABLE_NOT_FOUND = 203 => "the system could not find the environment option that was entered",
     ERROR_NO_DATA = 232 => "the pipe is being closed",
     ERROR_MORE_DATA = 234 => "more data is available",
     ERROR_OPERATION_ABORTED = 995 => "the I/O operation has been aborted because of either a thread exit or an application request",
