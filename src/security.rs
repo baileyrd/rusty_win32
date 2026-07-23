@@ -90,6 +90,13 @@ unsafe extern "system" {
         access_mask: u32,
         sid: *mut core::ffi::c_void,
     ) -> i32;
+    fn GetLengthSid(sid: *mut core::ffi::c_void) -> u32;
+    fn IsValidSid(sid: *mut core::ffi::c_void) -> i32;
+    fn CopySid(
+        dest_length: u32,
+        dest_sid: *mut core::ffi::c_void,
+        source_sid: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -992,6 +999,67 @@ pub unsafe fn add_access_denied_ace(
     }
 }
 
+/// The length in bytes of `sid` — `GetLengthSid`. Needed anywhere a
+/// `PSID` must be sized before copying it out of a short-lived buffer
+/// (e.g. [`copy_sid`]) into this crate's own storage.
+///
+/// # Safety
+///
+/// `sid` must be a valid `PSID` (as [`is_valid_sid`] would confirm) —
+/// `GetLengthSid` itself doesn't validate `sid`, and its behavior for an
+/// invalid one is undefined per its own documentation.
+pub unsafe fn sid_length(sid: *mut core::ffi::c_void) -> u32 {
+    // SAFETY: `sid` is caller-supplied per this function's own safety
+    // contract.
+    unsafe { GetLengthSid(sid) }
+}
+
+/// Whether `sid` is a structurally valid `PSID` — `IsValidSid`. Safe to
+/// call on any pointer at all (that's the whole point: it's how a caller
+/// checks a `PSID` before trusting it to [`sid_length`]/[`copy_sid`]/any
+/// other function in this module that assumes validity), so long as
+/// `sid` is itself readable memory of a plausible SID's shape — see the
+/// safety note below.
+///
+/// # Safety
+///
+/// `sid` must point to at least a `PSID`'s minimal fixed header's worth
+/// of readable memory (`IsValidSid` reads that header to judge
+/// structural validity) — an arbitrary dangling or unmapped pointer is
+/// still unsound to pass here, even though a well-formed-but-wrong SID
+/// is exactly the case this function exists to catch.
+pub unsafe fn is_valid_sid(sid: *mut core::ffi::c_void) -> bool {
+    // SAFETY: `sid` is caller-supplied per this function's own safety
+    // contract.
+    unsafe { IsValidSid(sid) != 0 }
+}
+
+/// Copy `sid` into a freshly allocated, owned [`SidBuf`] — `GetLengthSid`
+/// (to size the buffer) plus `CopySid`. The only way this module produces
+/// an owned copy of a `PSID` that started out as someone else's borrowed
+/// pointer (an owner/ACE SID from [`path_security_info`]/[`acl_entries`],
+/// which stay valid only as long as their source does).
+///
+/// # Safety
+///
+/// `sid` must be a valid `PSID` (as [`is_valid_sid`] would confirm) for
+/// the duration of this call.
+pub unsafe fn copy_sid(sid: *mut core::ffi::c_void) -> Result<SidBuf, crate::error::Win32Error> {
+    // SAFETY: `sid` is caller-supplied per this function's own safety
+    // contract.
+    let len = unsafe { sid_length(sid) };
+    let mut bytes: Vec<u8> = alloc::vec![0u8; len as usize];
+    // SAFETY: `bytes` is a valid, writable buffer of exactly `len` bytes,
+    // the length `GetLengthSid` itself just reported for `sid`; `sid` is
+    // caller-supplied per this function's own safety contract.
+    let ok = unsafe { CopySid(len, bytes.as_mut_ptr().cast(), sid) };
+    if ok == 0 {
+        Err(crate::error::Win32Error::last())
+    } else {
+        Ok(SidBuf { bytes })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1347,5 +1415,62 @@ mod tests {
         // Windows (windows-latest), not documented clearly enough to have
         // guessed correctly up front.
         assert_eq!(err, crate::error::Win32Error::ERROR_INSUFFICIENT_BUFFER);
+    }
+
+    #[test]
+    fn is_valid_sid_reports_true_for_a_real_files_owner() {
+        let path = std::env::temp_dir().join("rusty_win32_security_test_is_valid_sid.txt");
+        std::fs::write(&path, b"hello").expect("creating the test file should succeed");
+        let path_str = path.to_str().expect("temp path should be valid UTF-8");
+
+        let info = path_security_info(path_str, OWNER_SECURITY_INFORMATION)
+            .expect("GetNamedSecurityInfoW should succeed for a real file");
+        let owner = info.owner().expect("a real file should have an owner SID");
+
+        // SAFETY: `owner` is a valid `PSID` from `info`, which stays
+        // alive (not yet dropped) for this whole test.
+        assert!(unsafe { is_valid_sid(owner) });
+
+        std::fs::remove_file(&path).expect("removing the test file should succeed");
+    }
+
+    #[test]
+    fn sid_length_then_copy_sid_produces_a_buffer_of_the_reported_length() {
+        let path = std::env::temp_dir().join("rusty_win32_security_test_sid_length.txt");
+        std::fs::write(&path, b"hello").expect("creating the test file should succeed");
+        let path_str = path.to_str().expect("temp path should be valid UTF-8");
+
+        let info = path_security_info(path_str, OWNER_SECURITY_INFORMATION)
+            .expect("GetNamedSecurityInfoW should succeed for a real file");
+        let owner = info.owner().expect("a real file should have an owner SID");
+
+        // SAFETY: `owner` is a valid `PSID` from `info`, which stays
+        // alive (not yet dropped) for this whole test.
+        let len = unsafe { sid_length(owner) };
+        assert!(len > 0, "a real SID should have a nonzero length");
+
+        // SAFETY: `owner` as above.
+        let copied = unsafe { copy_sid(owner) }.expect("CopySid should succeed");
+        assert_eq!(
+            copied.bytes.len(),
+            len as usize,
+            "copy_sid's buffer should be exactly sid_length's reported size"
+        );
+
+        // The copy should resolve to the same account as the original --
+        // confirming CopySid produced a real, independently usable SID,
+        // not just a same-length garbage buffer.
+        // SAFETY: `owner` and `copied`'s SID are both still alive for
+        // this whole call.
+        let original_account =
+            unsafe { lookup_account_sid(owner) }.expect("LookupAccountSidW should succeed");
+        let copied_account = unsafe { lookup_account_sid(copied.as_ptr().cast_mut()) }
+            .expect("LookupAccountSidW should succeed on the copied SID");
+        assert_eq!(
+            original_account, copied_account,
+            "the copied SID should resolve to the same account as the original"
+        );
+
+        std::fs::remove_file(&path).expect("removing the test file should succeed");
     }
 }

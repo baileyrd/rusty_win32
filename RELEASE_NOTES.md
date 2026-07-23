@@ -6,6 +6,21 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #232 — security: add sid_length/is_valid_sid/copy_sid
+**2026-07-23** · [#232](https://github.com/baileyrd/rusty_win32/pull/232)
+
+- **Added:** `security::sid_length`/`security::is_valid_sid`/
+  `security::copy_sid` (`GetLengthSid`/`IsValidSid`/`CopySid`), closing
+  issue #161 — sizing, validity-checking, and owned-copying of an opaque
+  `PSID`. `copy_sid` sizes the destination buffer via `GetLengthSid`
+  itself before calling `CopySid`, and reuses the existing `SidBuf` type
+  (from PR #229's `lookup_account_name`) rather than introducing a new
+  owned-SID representation — this is the only other place in the module
+  that produces one, needed anywhere a SID must outlive the short-lived
+  buffer it was originally borrowed from (an owner/ACE SID from
+  `path_security_info`/`acl_entries`, both of which only stay valid as
+  long as their source does).
+
 ## PR #231 — security: add initialize_acl/add_access_allowed_ace/add_access_denied_ace
 **2026-07-23** · [#231](https://github.com/baileyrd/rusty_win32/pull/231)
 
