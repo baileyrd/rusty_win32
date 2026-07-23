@@ -6,6 +6,23 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #226 — security: add acl_entries
+**2026-07-23** · [#226](https://github.com/baileyrd/rusty_win32/pull/226)
+
+- **Added:** `security::acl_entries` (`GetAclInformation` + `GetAce`)
+  plus a new `AclEntry`/`AceKind` pair and a fixed-header-only `Acl`
+  mirror, closing issue #155 — enumerate a DACL's ACEs one at a time,
+  turning an opaque ACL into the human-readable permission list
+  `icacls`/`ls -l` displays. `Acl`/`ACE_HEADER`-shaped structs are
+  modeled to their fixed header only (per `gap-analysis.md`'s design
+  notes for this module), the same "fixed-header-only" treatment
+  `fs.rs`'s `ReparseDataBufferSymlinkHeader` already uses for a
+  different variable-length Win32 structure — never read directly,
+  always through `GetAclInformation`/`GetAce`. Only the two ordinary
+  allow/deny ACE kinds are decoded into a `Mask`/`SID`; any other kind
+  (audit, object-specific, callback, …) is still reported, as
+  `AceKind::Other`, rather than silently dropped from the list.
+
 ## PR #225 — security: add path_security_info/set_path_security_info
 **2026-07-23** · [#225](https://github.com/baileyrd/rusty_win32/pull/225)
 

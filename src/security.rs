@@ -42,11 +42,105 @@ unsafe extern "system" {
         dacl: *mut core::ffi::c_void,
         sacl: *mut core::ffi::c_void,
     ) -> u32;
+    fn GetAclInformation(
+        acl: *const Acl,
+        acl_information: *mut core::ffi::c_void,
+        acl_information_length: u32,
+        acl_information_class: u32,
+    ) -> i32;
+    fn GetAce(acl: *const Acl, ace_index: u32, ace: *mut *mut core::ffi::c_void) -> i32;
 }
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn LocalFree(mem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+}
+
+// ACL: `size_of` 8, `align_of` 2 on x86_64 — verified against
+// mingw-w64's own `winnt.h` with a compiled `_Static_assert` probe, the
+// same discipline this crate uses for every other struct layout it can't
+// check any other way. A real, variable-length ACL has its ACEs packed
+// immediately after this fixed header — not represented as a Rust field,
+// the same "fixed-header-only" treatment `fs.rs`'s
+// `ReparseDataBufferSymlinkHeader` already uses for a different
+// variable-length Win32 structure. This crate never reads `Acl`'s own
+// fields directly (not even `ace_count`) — always through
+// `GetAclInformation`/`GetAce`, matching `gap-analysis.md`'s design
+// notes for this module: an ACL is manipulated only through its own
+// accessor functions, the same as a `PSID`.
+#[repr(C)]
+pub struct Acl {
+    acl_revision: u8,
+    sbz1: u8,
+    acl_size: u16,
+    ace_count: u16,
+    sbz2: u16,
+}
+const _: () = assert!(core::mem::size_of::<Acl>() == 8);
+const _: () = assert!(core::mem::align_of::<Acl>() == 2);
+
+// ACE_HEADER: `size_of` 4 — every ACE (allow, deny, audit, …) starts
+// with this fixed prefix regardless of its own specific shape.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AceHeader {
+    ace_type: u8,
+    ace_flags: u8,
+    ace_size: u16,
+}
+const _: () = assert!(core::mem::size_of::<AceHeader>() == 4);
+
+/// `ACE_HEADER.AceType`'s two ordinary kinds — the only ones this module
+/// decodes further (audit, object-specific, callback, and other rarer
+/// ACE types are out of scope; [`acl_entries`] still reports them, as
+/// `Other`, rather than silently dropping them from the list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AceKind {
+    /// `ACCESS_ALLOWED_ACE_TYPE`.
+    Allow,
+    /// `ACCESS_DENIED_ACE_TYPE`.
+    Deny,
+    /// Any other `AceType` this module doesn't decode further.
+    Other(u8),
+}
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+const ACCESS_DENIED_ACE_TYPE: u8 = 1;
+
+/// `GetAclInformation`'s `ACL_INFORMATION_CLASS` value this module
+/// needs — the ACE count (plus byte-usage figures this crate doesn't
+/// otherwise expose).
+const ACL_SIZE_INFORMATION_CLASS: u32 = 2;
+
+// ACL_SIZE_INFORMATION: `size_of` 12 — three plain `DWORD`s, no padding.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct AclSizeInformation {
+    ace_count: u32,
+    acl_bytes_in_use: u32,
+    acl_bytes_free: u32,
+}
+const _: () = assert!(core::mem::size_of::<AclSizeInformation>() == 12);
+
+/// One decoded ACE from [`acl_entries`] — allow/deny ACEs share the same
+/// `ACCESS_ALLOWED_ACE`-shaped layout (`Header`/`Mask`/a trailing `SID`),
+/// so both are represented the same way here; `kind` distinguishes
+/// which.
+#[derive(Debug, Clone, Copy)]
+pub struct AclEntry {
+    pub kind: AceKind,
+    /// `ACE_HEADER.AceFlags` — inheritance/inherited/audit bits, exposed
+    /// raw and policy-free, matching this crate's existing convention
+    /// for other bitmask fields.
+    pub flags: u8,
+    /// `ACCESS_MASK` — this ACE's permission bits. Only meaningful for
+    /// [`AceKind::Allow`]/[`AceKind::Deny`]; `0` for any other kind
+    /// (which has no `Mask` field at this same offset to begin with).
+    pub mask: u32,
+    /// A `PSID` pointing into the ACL's own memory (not separately
+    /// owned/freed) — opaque, never decoded structurally by this crate.
+    /// `None` for any ACE kind other than
+    /// [`AceKind::Allow`]/[`AceKind::Deny`].
+    pub sid: Option<*const core::ffi::c_void>,
 }
 
 /// `SE_OBJECT_TYPE`'s file-object variant — this module's only supported
@@ -237,6 +331,80 @@ pub unsafe fn set_path_security_info(
     }
 }
 
+/// Enumerate `acl`'s ACEs — `GetAclInformation` (for the ACE count) plus
+/// one `GetAce` call per entry — turning an opaque DACL/SACL into the
+/// human-readable permission list `icacls`/`ls -l` displays. Each `GetAce`
+/// call hands back a pointer into `acl`'s own existing memory (not a
+/// fresh allocation), so the returned entries' [`AclEntry::sid`] pointers
+/// stay valid only as long as `acl` itself does.
+///
+/// # Safety
+///
+/// `acl` must be a valid, currently-live `PACL` — e.g. one
+/// [`PathSecurityInfo::dacl`] returned, kept alive (the `PathSecurityInfo`
+/// it came from not yet dropped) for as long as this call and the
+/// returned entries are in use.
+pub unsafe fn acl_entries(
+    acl: *const Acl,
+) -> Result<alloc::vec::Vec<AclEntry>, crate::error::Win32Error> {
+    let mut size_info = AclSizeInformation::default();
+    // SAFETY: `acl` is caller-supplied per this function's own safety
+    // contract; `size_info` is a valid out-pointer of exactly the size
+    // named by `acl_information_length`.
+    let ok = unsafe {
+        GetAclInformation(
+            acl,
+            (&mut size_info as *mut AclSizeInformation).cast(),
+            core::mem::size_of::<AclSizeInformation>() as u32,
+            ACL_SIZE_INFORMATION_CLASS,
+        )
+    };
+    if ok == 0 {
+        return Err(crate::error::Win32Error::last());
+    }
+
+    let mut entries = alloc::vec::Vec::with_capacity(size_info.ace_count as usize);
+    for index in 0..size_info.ace_count {
+        let mut ace_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
+        // SAFETY: `acl` is the same caller-supplied, valid `PACL`;
+        // `index` is within `0..ace_count`, the range `GetAclInformation`
+        // just reported; `ace_ptr` is a valid out-pointer.
+        let ok = unsafe { GetAce(acl, index, &mut ace_ptr) };
+        if ok == 0 {
+            return Err(crate::error::Win32Error::last());
+        }
+        // SAFETY: a successful `GetAce` guarantees `ace_ptr` points to a
+        // real ACE at least `ACE_HEADER`-sized (every ACE, regardless of
+        // its specific kind, starts with this fixed prefix).
+        let header: AceHeader = unsafe { core::ptr::read_unaligned(ace_ptr.cast()) };
+        let kind = match header.ace_type {
+            ACCESS_ALLOWED_ACE_TYPE => AceKind::Allow,
+            ACCESS_DENIED_ACE_TYPE => AceKind::Deny,
+            other => AceKind::Other(other),
+        };
+        let (mask, sid) = if matches!(kind, AceKind::Allow | AceKind::Deny) {
+            // SAFETY: an allow/deny ACE shares `ACCESS_ALLOWED_ACE`'s
+            // layout, guaranteed at least 12 bytes (`Header` + `Mask` +
+            // the trailing SID's first `DWORD`) by Windows itself for
+            // these two ACE types.
+            let mask: u32 = unsafe { core::ptr::read_unaligned(ace_ptr.byte_add(4).cast()) };
+            // SAFETY: same guarantee — byte offset 8 is
+            // `ACCESS_ALLOWED_ACE::SidStart`, the trailing SID's start.
+            let sid = unsafe { ace_ptr.byte_add(8) }.cast_const();
+            (mask, Some(sid))
+        } else {
+            (0, None)
+        };
+        entries.push(AclEntry {
+            kind,
+            flags: header.ace_flags,
+            mask,
+            sid,
+        });
+    }
+    Ok(entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +465,45 @@ mod tests {
         let err = path_security_info(path_str, OWNER_SECURITY_INFORMATION)
             .expect_err("GetNamedSecurityInfoW should fail for a nonexistent path");
         assert_eq!(err, crate::error::Win32Error::ERROR_FILE_NOT_FOUND);
+    }
+
+    #[test]
+    fn acl_entries_reports_at_least_one_recognized_ace_for_a_real_files_dacl() {
+        let path = std::env::temp_dir().join("rusty_win32_security_test_acl_entries.txt");
+        std::fs::write(&path, b"hello").expect("creating the test file should succeed");
+        let path_str = path.to_str().expect("temp path should be valid UTF-8");
+
+        let info = path_security_info(path_str, DACL_SECURITY_INFORMATION)
+            .expect("GetNamedSecurityInfoW should succeed for a real file");
+        let dacl = info
+            .dacl()
+            .expect("a real file should have a DACL")
+            .cast_const()
+            .cast::<Acl>();
+
+        // SAFETY: `dacl` is a valid `PACL` from `info`, which stays alive
+        // (not yet dropped) for this whole call.
+        let entries =
+            unsafe { acl_entries(dacl) }.expect("GetAclInformation/GetAce should succeed");
+        assert!(
+            !entries.is_empty(),
+            "a real file's DACL should have at least one ACE"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| matches!(e.kind, AceKind::Allow | AceKind::Deny)),
+            "a real file's DACL should have at least one ordinary allow/deny ACE, got: {entries:?}"
+        );
+        for entry in &entries {
+            if matches!(entry.kind, AceKind::Allow | AceKind::Deny) {
+                assert!(
+                    entry.sid.is_some(),
+                    "an allow/deny ACE should always carry a SID"
+                );
+            }
+        }
+
+        std::fs::remove_file(&path).expect("removing the test file should succeed");
     }
 }
