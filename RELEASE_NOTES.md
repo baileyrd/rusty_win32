@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #198 — volume: add find_volumes (FindFirstVolumeW/FindNextVolumeW/FindVolumeClose)
+**2026-07-23** · [#198](https://github.com/baileyrd/rusty_win32/pull/198)
+
+- **Added:** `volume::find_volumes` (`FindFirstVolumeW`/`FindNextVolumeW`/
+  `FindVolumeClose`), closing issue #127 — enumerates every volume by its
+  stable GUID path (`\\?\Volume{GUID}\`), independent of drive-letter
+  assignment, unlike `volume::logical_drives`. Mirrors `fs::read_dir`'s
+  `ReadDir` iterator shape (`FindClose`-on-drop). Another round-2 "weak/no
+  clear consumer" item (`gap-analysis.md`); no current `rush` feature asks
+  for this.
+
 ## PR #197 — handle: add signal_and_wait (SignalObjectAndWait)
 **2026-07-23** · [#197](https://github.com/baileyrd/rusty_win32/pull/197)
 

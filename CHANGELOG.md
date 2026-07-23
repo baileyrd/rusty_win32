@@ -144,6 +144,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `handle::signal_and_wait` (`SignalObjectAndWait`), atomically signaling
   one synchronization object and waiting on another — another round-2
   item.
+- `volume::find_volumes` (`FindFirstVolumeW`/`FindNextVolumeW`/
+  `FindVolumeClose`), enumerating every volume by its stable GUID path,
+  independent of drive-letter assignment — another round-2 item.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

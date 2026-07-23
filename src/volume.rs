@@ -10,6 +10,7 @@
 //! framing.
 
 use crate::error::Win32Error;
+use crate::handle::RawHandle;
 
 extern crate alloc;
 use alloc::string::String;
@@ -49,6 +50,17 @@ const DRIVE_RAMDISK: u32 = 6;
 /// `"NTFS"`/`"FAT32"`), so a single call is always enough in practice.
 const NAME_BUFFER_LEN: usize = 261;
 
+/// Microsoft's own documented minimum buffer size for
+/// `FindFirstVolumeW`/`FindNextVolumeW`'s volume-name output — comfortably
+/// larger than a GUID volume path (`\\?\Volume{xxxxxxxx-xxxx-xxxx-xxxx-
+/// xxxxxxxxxxxx}\`, 49 characters plus a NUL) ever needs.
+const VOLUME_NAME_BUFFER_LEN: usize = 50;
+
+/// `INVALID_HANDLE_VALUE` — the sentinel `FindFirstVolumeW` returns instead
+/// of `NULL` on failure, the same convention `fs::read_dir`'s
+/// `FindFirstFileW` uses.
+const INVALID_HANDLE_VALUE: isize = -1;
+
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetLogicalDrives() -> u32;
@@ -69,6 +81,9 @@ unsafe extern "system" {
         total_number_of_bytes: *mut u64,
         total_number_of_free_bytes: *mut u64,
     ) -> i32;
+    fn FindFirstVolumeW(volume_name: *mut u16, buffer_length: u32) -> RawHandle;
+    fn FindNextVolumeW(find_volume: RawHandle, volume_name: *mut u16, buffer_length: u32) -> i32;
+    fn FindVolumeClose(find_volume: RawHandle) -> i32;
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -223,6 +238,77 @@ pub fn disk_free_space(root_path: &str) -> Result<DiskFreeSpace, Win32Error> {
     })
 }
 
+/// Enumerates every volume on the system by its stable GUID path
+/// (`\\?\Volume{GUID}\`), independent of drive-letter assignment —
+/// `FindFirstVolumeW`/`FindNextVolumeW`, closing the search handle via
+/// `FindVolumeClose` on drop (including on an early `break`), the same
+/// shape [`crate::fs::read_dir`]'s `ReadDir` already established for
+/// `FindFirstFileW`/`FindNextFileW`/`FindClose`. A GUID volume path stays
+/// stable across reboots/drive-letter reassignment, unlike
+/// [`logical_drives`]'s drive letters.
+#[derive(Debug)]
+pub struct FindVolumes {
+    handle: RawHandle,
+    // `FindFirstVolumeW` already produced the first entry by the time this
+    // struct exists — `next()` returns it before ever calling
+    // `FindNextVolumeW`, the same "the opening call already returned data"
+    // shape `fs::ReadDir`/`process::list_processes` use.
+    pending: Option<String>,
+}
+
+impl Iterator for FindVolumes {
+    type Item = Result<String, Win32Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(name) = self.pending.take() {
+            return Some(Ok(name));
+        }
+        let mut buf = alloc::vec![0u16; VOLUME_NAME_BUFFER_LEN];
+        // SAFETY: `self.handle` is a valid, currently-open search handle
+        // (from `find_volumes`, not yet closed); `buf` is a valid,
+        // `VOLUME_NAME_BUFFER_LEN`-element writable buffer matched by the
+        // `buffer_length` argument naming its exact length.
+        let found = unsafe { FindNextVolumeW(self.handle, buf.as_mut_ptr(), buf.len() as u32) };
+        if found == 0 {
+            // `FindNextFileW`'s own end-of-enumeration convention, applied
+            // the same way here: a `FALSE` return with
+            // `GetLastError() == ERROR_NO_MORE_FILES` means "nothing left,"
+            // not a real error.
+            let err = Win32Error::last();
+            return if err == Win32Error::ERROR_NO_MORE_FILES {
+                None
+            } else {
+                Some(Err(err))
+            };
+        }
+        Some(Ok(from_wide(&buf)))
+    }
+}
+
+impl Drop for FindVolumes {
+    fn drop(&mut self) {
+        // SAFETY: `self.handle` is a valid, currently-open search handle,
+        // closed exactly once here and never used again after.
+        let _ = unsafe { FindVolumeClose(self.handle) };
+    }
+}
+
+/// Start enumerating every volume on the system — `FindFirstVolumeW`.
+pub fn find_volumes() -> Result<FindVolumes, Win32Error> {
+    let mut buf = alloc::vec![0u16; VOLUME_NAME_BUFFER_LEN];
+    // SAFETY: `buf` is a valid, `VOLUME_NAME_BUFFER_LEN`-element writable
+    // buffer matched by the `buffer_length` argument naming its exact
+    // length.
+    let handle = unsafe { FindFirstVolumeW(buf.as_mut_ptr(), buf.len() as u32) };
+    if handle.is_null() || handle as isize == INVALID_HANDLE_VALUE {
+        return Err(Win32Error::last());
+    }
+    Ok(FindVolumes {
+        handle,
+        pending: Some(from_wide(&buf)),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +392,23 @@ mod tests {
             space.free_bytes_available_to_caller <= space.total_free_bytes,
             "caller-available free space can't exceed the volume's total free space"
         );
+    }
+
+    #[test]
+    fn find_volumes_reports_at_least_one_guid_volume_path() {
+        let volumes: Vec<String> = find_volumes()
+            .expect("FindFirstVolumeW should succeed")
+            .collect::<Result<_, _>>()
+            .expect("FindNextVolumeW should succeed for every entry");
+        assert!(
+            !volumes.is_empty(),
+            "a real Windows machine should have at least one volume (the system drive's)"
+        );
+        for name in &volumes {
+            assert!(
+                name.starts_with(r"\\?\Volume{") && name.ends_with('\\'),
+                "every entry should be a GUID volume path, got: {name:?}"
+            );
+        }
     }
 }
