@@ -23,9 +23,24 @@
 //! which [`wait_for_message`] blocks for. As with every other primitive in
 //! this crate, deciding what a caller does with a given [`JOB_OBJECT_MSG_EXIT_PROCESS`]
 //! (etc.) is the caller's policy — this module only delivers the raw message.
+//!
+//! [`set_resource_limits`]/[`limits`]/[`accounting`] round out the round-2
+//! capability assessment's Job-Object-related item: `rush`'s `ulimit` is a
+//! flat "not supported" on Windows today, and Job-Object memory/CPU-time/
+//! active-process limits are that doc's own answer for the only realistic
+//! partial fix — the struct fields these use
+//! (`JobObjectExtendedLimitInformation`'s memory/CPU-time/process-count
+//! fields) were already modeled bit-for-bit for [`set_kill_on_close`], just
+//! never set beyond its one `LimitFlags` bit until now. [`accounting`]
+//! (`JobObjectBasicAndIoAccountingInformation`) is Windows' real analog of
+//! POSIX `cutime`/`cstime`: CPU time aggregated across every process a job
+//! has *ever* contained, including ones already exited — unlike
+//! [`crate::process::times`], which only ever reports one still-open
+//! process handle's own times.
 
 use crate::error::Win32Error;
 use crate::handle::RawHandle;
+use crate::time::Timespec;
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -34,6 +49,21 @@ use alloc::vec::Vec;
 /// have every handle to it close, e.g. on process exit) and every process
 /// still assigned to it terminates.
 const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+/// `LimitFlags` bit: cap a single process's user-mode CPU time
+/// (`per_process_user_time_limit`).
+const JOB_OBJECT_LIMIT_PROCESS_TIME: u32 = 0x0000_0002;
+/// `LimitFlags` bit: cap the job's total user-mode CPU time across every
+/// member process (`per_job_user_time_limit`).
+const JOB_OBJECT_LIMIT_JOB_TIME: u32 = 0x0000_0004;
+/// `LimitFlags` bit: cap the number of processes simultaneously active in
+/// the job (`active_process_limit`).
+const JOB_OBJECT_LIMIT_ACTIVE_PROCESS: u32 = 0x0000_0008;
+/// `LimitFlags` bit: cap one process's committed memory, in bytes
+/// (`process_memory_limit`).
+const JOB_OBJECT_LIMIT_PROCESS_MEMORY: u32 = 0x0000_0100;
+/// `LimitFlags` bit: cap the job's total committed memory, in bytes
+/// (`job_memory_limit`).
+const JOB_OBJECT_LIMIT_JOB_MEMORY: u32 = 0x0000_0200;
 
 /// `QueryInformationJobObject`/`SetInformationJobObject`'s
 /// `JobObjectExtendedLimitInformation` class.
@@ -43,6 +73,38 @@ const JOB_OBJECT_BASIC_PROCESS_ID_LIST_CLASS: u32 = 3;
 /// `SetInformationJobObject`'s `JobObjectAssociateCompletionPortInformation`
 /// class.
 const JOB_OBJECT_ASSOCIATE_COMPLETION_PORT_CLASS: u32 = 7;
+/// `QueryInformationJobObject`'s `JobObjectBasicAndIoAccountingInformation`
+/// class.
+const JOB_OBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION_CLASS: u32 = 8;
+
+/// 100ns ticks per second — `LARGE_INTEGER` CPU-time fields in this module
+/// (`JOBOBJECT_BASIC_ACCOUNTING_INFORMATION`'s `TotalUserTime`/
+/// `TotalKernelTime`, `JOBOBJECT_BASIC_LIMIT_INFORMATION`'s
+/// `*_user_time_limit`) use the same tick unit `FILETIME` does, without a
+/// `FILETIME`'s two-`u32` layout — these are already a plain `i64`. The same
+/// standard conversion constant `process.rs`/`fs.rs`/`time.rs` use for
+/// `FILETIME`, duplicated locally per this crate's existing convention.
+const HUNDRED_NS_PER_SEC: i64 = 10_000_000;
+const NANOS_PER_HUNDRED_NS: i64 = 100;
+
+/// An elapsed-duration 100ns tick count (no FILETIME epoch to subtract,
+/// unlike a wall-clock timestamp) to [`Timespec`] — the same reuse
+/// `process::times`'s `kernel_time`/`user_time` and `time::now_monotonic`'s
+/// result already rely on for a non-wall-clock value.
+fn ticks_to_duration(ticks_100ns: i64) -> Timespec {
+    let secs = ticks_100ns / HUNDRED_NS_PER_SEC;
+    let remainder_100ns = ticks_100ns % HUNDRED_NS_PER_SEC;
+    Timespec {
+        secs,
+        nanos: (remainder_100ns * NANOS_PER_HUNDRED_NS) as u32,
+    }
+}
+
+/// The reverse of [`ticks_to_duration`], for building a limit's raw
+/// `LARGE_INTEGER` tick count from a caller-supplied [`Timespec`] duration.
+fn duration_to_ticks(t: Timespec) -> i64 {
+    t.secs * HUNDRED_NS_PER_SEC + i64::from(t.nanos) / NANOS_PER_HUNDRED_NS
+}
 
 /// `GetQueuedCompletionStatus`'s own documented "no packet queued within the
 /// timeout" code, surfaced via `GetLastError()` on a `FALSE` return — the
@@ -129,6 +191,50 @@ const _: () = assert!(core::mem::align_of::<JobObjectExtendedLimitInformation>()
 const _: () = assert!(core::mem::offset_of!(JobObjectExtendedLimitInformation, io_info) == 64);
 const _: () =
     assert!(core::mem::offset_of!(JobObjectExtendedLimitInformation, process_memory_limit) == 112);
+
+/// `JOBOBJECT_BASIC_ACCOUNTING_INFORMATION`: `size_of` 48, `align_of` 8.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct JobObjectBasicAccountingInformation {
+    total_user_time: i64,
+    total_kernel_time: i64,
+    this_period_total_user_time: i64,
+    this_period_total_kernel_time: i64,
+    total_page_fault_count: u32,
+    total_processes: u32,
+    active_processes: u32,
+    total_terminated_processes: u32,
+}
+const _: () = assert!(core::mem::size_of::<JobObjectBasicAccountingInformation>() == 48);
+const _: () = assert!(core::mem::align_of::<JobObjectBasicAccountingInformation>() == 8);
+const _: () =
+    assert!(core::mem::offset_of!(JobObjectBasicAccountingInformation, total_kernel_time) == 8);
+const _: () = assert!(
+    core::mem::offset_of!(JobObjectBasicAccountingInformation, total_page_fault_count) == 32
+);
+const _: () =
+    assert!(core::mem::offset_of!(JobObjectBasicAccountingInformation, total_processes) == 36);
+const _: () =
+    assert!(core::mem::offset_of!(JobObjectBasicAccountingInformation, active_processes) == 40);
+const _: () = assert!(
+    core::mem::offset_of!(
+        JobObjectBasicAccountingInformation,
+        total_terminated_processes
+    ) == 44
+);
+
+/// `JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION`: `size_of` 96,
+/// `align_of` 8.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct JobObjectBasicAndIoAccountingInformation {
+    basic_info: JobObjectBasicAccountingInformation,
+    io_info: IoCounters,
+}
+const _: () = assert!(core::mem::size_of::<JobObjectBasicAndIoAccountingInformation>() == 96);
+const _: () = assert!(core::mem::align_of::<JobObjectBasicAndIoAccountingInformation>() == 8);
+const _: () =
+    assert!(core::mem::offset_of!(JobObjectBasicAndIoAccountingInformation, io_info) == 48);
 
 /// `JOBOBJECT_ASSOCIATE_COMPLETION_PORT`: `size_of` 16, `align_of` 8 on
 /// x86_64 — two pointer-sized fields, no padding.
@@ -344,6 +450,203 @@ pub unsafe fn process_ids(job: RawHandle) -> Result<Vec<usize>, Win32Error> {
         let pids = unsafe { core::slice::from_raw_parts(pids_ptr, in_list) };
         return Ok(pids.to_vec());
     }
+}
+
+/// Resource limits settable via [`set_resource_limits`]/readable via
+/// [`limits`] — the narrow subset of `ulimit` classes a Windows Job Object
+/// can actually enforce (rush's own `docs/WINDOWS_BACKEND_ANALYSIS.md` §6
+/// names this the only legitimate way to ever partially support `ulimit` on
+/// Windows, rather than a `getrlimit`/`setrlimit` port). Every field is
+/// `Option`: `None` leaves that particular limit unset/unenforced.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobLimits {
+    /// Maximum number of processes simultaneously active in the job at
+    /// once.
+    pub active_process_limit: Option<u32>,
+    /// Maximum committed memory for a single process in the job, in bytes.
+    pub process_memory_limit: Option<usize>,
+    /// Maximum committed memory across the whole job, in bytes.
+    pub job_memory_limit: Option<usize>,
+    /// Maximum user-mode CPU time for a single process in the job.
+    pub per_process_user_time_limit: Option<Timespec>,
+    /// Maximum total user-mode CPU time across every process the job has
+    /// ever contained.
+    pub per_job_user_time_limit: Option<Timespec>,
+}
+
+/// Set `job`'s resource limits to `limits` —
+/// `SetInformationJobObject(JobObjectExtendedLimitInformation)`.
+///
+/// **This replaces the job's entire limit-information block in one call**,
+/// the same as [`set_kill_on_close`]/[`clear_kill_on_close`]: calling this
+/// after either of those (or vice versa) clears whatever the other call
+/// set, since none of the three queries the job's current limits first
+/// before writing a fresh block. A caller wanting kill-on-close *and*
+/// resource limits together needs to combine both concerns into one
+/// `SetInformationJobObject` call itself — not currently exposed as a
+/// single primitive here.
+///
+/// # Safety
+///
+/// `job` must be a currently-open, valid Job Object handle.
+pub unsafe fn set_resource_limits(job: RawHandle, limits: JobLimits) -> Result<(), Win32Error> {
+    let mut basic = JobObjectBasicLimitInformation::default();
+    if let Some(n) = limits.active_process_limit {
+        basic.limit_flags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        basic.active_process_limit = n;
+    }
+    if let Some(t) = limits.per_process_user_time_limit {
+        basic.limit_flags |= JOB_OBJECT_LIMIT_PROCESS_TIME;
+        basic.per_process_user_time_limit = duration_to_ticks(t);
+    }
+    if let Some(t) = limits.per_job_user_time_limit {
+        basic.limit_flags |= JOB_OBJECT_LIMIT_JOB_TIME;
+        basic.per_job_user_time_limit = duration_to_ticks(t);
+    }
+    let mut info = JobObjectExtendedLimitInformation {
+        basic_limit_information: basic,
+        ..Default::default()
+    };
+    if let Some(m) = limits.process_memory_limit {
+        info.basic_limit_information.limit_flags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+        info.process_memory_limit = m;
+    }
+    if let Some(m) = limits.job_memory_limit {
+        info.basic_limit_information.limit_flags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+        info.job_memory_limit = m;
+    }
+    // SAFETY: `job` is caller-supplied per this function's own safety
+    // contract; `info` is a valid, correctly-sized, initialized struct of
+    // exactly the type `JobObjectExtendedLimitInformation` names.
+    let ok = unsafe {
+        SetInformationJobObject(
+            job,
+            JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            (&info as *const JobObjectExtendedLimitInformation).cast(),
+            core::mem::size_of::<JobObjectExtendedLimitInformation>() as u32,
+        )
+    };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
+/// Read `job`'s current resource limits back —
+/// `QueryInformationJobObject(JobObjectExtendedLimitInformation)`, the query
+/// counterpart to [`set_resource_limits`]. A field reports `None` exactly
+/// when its corresponding `LimitFlags` bit is clear, matching
+/// [`set_resource_limits`]'s own `Option` convention rather than reporting a
+/// meaningless raw zero for a limit nothing ever set.
+///
+/// # Safety
+///
+/// `job` must be a currently-open, valid Job Object handle.
+pub unsafe fn limits(job: RawHandle) -> Result<JobLimits, Win32Error> {
+    let mut info = JobObjectExtendedLimitInformation::default();
+    let mut returned_len: u32 = 0;
+    // SAFETY: `job` is caller-supplied per this function's own safety
+    // contract; `info` is a valid, correctly-sized out-pointer;
+    // `returned_len` is a valid out-pointer.
+    let ok = unsafe {
+        QueryInformationJobObject(
+            job,
+            JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            (&mut info as *mut JobObjectExtendedLimitInformation).cast(),
+            core::mem::size_of::<JobObjectExtendedLimitInformation>() as u32,
+            &mut returned_len,
+        )
+    };
+    if ok == 0 {
+        return Err(Win32Error::last());
+    }
+    let flags = info.basic_limit_information.limit_flags;
+    Ok(JobLimits {
+        active_process_limit: (flags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS != 0)
+            .then_some(info.basic_limit_information.active_process_limit),
+        process_memory_limit: (flags & JOB_OBJECT_LIMIT_PROCESS_MEMORY != 0)
+            .then_some(info.process_memory_limit),
+        job_memory_limit: (flags & JOB_OBJECT_LIMIT_JOB_MEMORY != 0)
+            .then_some(info.job_memory_limit),
+        per_process_user_time_limit: (flags & JOB_OBJECT_LIMIT_PROCESS_TIME != 0).then_some(
+            ticks_to_duration(info.basic_limit_information.per_process_user_time_limit),
+        ),
+        per_job_user_time_limit: (flags & JOB_OBJECT_LIMIT_JOB_TIME != 0).then_some(
+            ticks_to_duration(info.basic_limit_information.per_job_user_time_limit),
+        ),
+    })
+}
+
+/// [`accounting`]'s result — `QueryInformationJobObject`'s
+/// `JobObjectBasicAndIoAccountingInformation`, Windows' real analog of
+/// POSIX `cutime`/`cstime`: CPU time and I/O counts aggregated across
+/// *every* process the job has ever contained, including ones that already
+/// exited — unlike [`crate::process::times`], which only ever reports one
+/// still-open process handle's own times.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobAccounting {
+    /// Total user-mode CPU time across every process the job has ever
+    /// contained.
+    pub total_user_time: Timespec,
+    /// Total kernel-mode CPU time across every process the job has ever
+    /// contained.
+    pub total_kernel_time: Timespec,
+    pub total_page_fault_count: u32,
+    /// Every process ever assigned to the job, including ones already
+    /// terminated.
+    pub total_processes: u32,
+    /// Processes currently assigned to the job — `0` once the job has
+    /// emptied out, the same condition [`process_ids`] reports as an empty
+    /// list.
+    pub active_processes: u32,
+    pub total_terminated_processes: u32,
+    pub read_operation_count: u64,
+    pub write_operation_count: u64,
+    pub other_operation_count: u64,
+    pub read_transfer_count: u64,
+    pub write_transfer_count: u64,
+    pub other_transfer_count: u64,
+}
+
+/// CPU-time and I/O accounting for `job`, aggregated across its whole
+/// lifetime — `QueryInformationJobObject(JobObjectBasicAndIoAccountingInformation)`.
+///
+/// # Safety
+///
+/// `job` must be a currently-open, valid Job Object handle.
+pub unsafe fn accounting(job: RawHandle) -> Result<JobAccounting, Win32Error> {
+    let mut info = JobObjectBasicAndIoAccountingInformation::default();
+    let mut returned_len: u32 = 0;
+    // SAFETY: `job` is caller-supplied per this function's own safety
+    // contract; `info` is a valid, correctly-sized out-pointer;
+    // `returned_len` is a valid out-pointer.
+    let ok = unsafe {
+        QueryInformationJobObject(
+            job,
+            JOB_OBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION_CLASS,
+            (&mut info as *mut JobObjectBasicAndIoAccountingInformation).cast(),
+            core::mem::size_of::<JobObjectBasicAndIoAccountingInformation>() as u32,
+            &mut returned_len,
+        )
+    };
+    if ok == 0 {
+        return Err(Win32Error::last());
+    }
+    Ok(JobAccounting {
+        total_user_time: ticks_to_duration(info.basic_info.total_user_time),
+        total_kernel_time: ticks_to_duration(info.basic_info.total_kernel_time),
+        total_page_fault_count: info.basic_info.total_page_fault_count,
+        total_processes: info.basic_info.total_processes,
+        active_processes: info.basic_info.active_processes,
+        total_terminated_processes: info.basic_info.total_terminated_processes,
+        read_operation_count: info.io_info.read_operation_count,
+        write_operation_count: info.io_info.write_operation_count,
+        other_operation_count: info.io_info.other_operation_count,
+        read_transfer_count: info.io_info.read_transfer_count,
+        write_transfer_count: info.io_info.write_transfer_count,
+        other_transfer_count: info.io_info.other_transfer_count,
+    })
 }
 
 /// Create a fresh I/O completion port not yet tied to any file or job —
@@ -628,5 +931,84 @@ mod tests {
         // SAFETY: `port` is a valid, currently-open handle, closed exactly
         // once.
         unsafe { crate::handle::close(port).unwrap() };
+    }
+
+    #[test]
+    fn set_resource_limits_round_trips_through_a_query() {
+        let job = create().expect("CreateJobObjectW should succeed");
+        let limits_in = JobLimits {
+            active_process_limit: Some(4),
+            process_memory_limit: Some(64 * 1024 * 1024),
+            job_memory_limit: Some(256 * 1024 * 1024),
+            per_process_user_time_limit: Some(Timespec { secs: 30, nanos: 0 }),
+            per_job_user_time_limit: Some(Timespec { secs: 60, nanos: 0 }),
+        };
+        // SAFETY: `job` is freshly created and valid.
+        unsafe { set_resource_limits(job, limits_in) }
+            .expect("SetInformationJobObject should succeed");
+
+        // SAFETY: `job` is the same valid handle.
+        let limits_out = unsafe { limits(job) }.expect("QueryInformationJobObject should succeed");
+        assert_eq!(
+            limits_out, limits_in,
+            "every limit set should read back exactly as set"
+        );
+
+        // SAFETY: `job` is a valid, currently-open handle, closed exactly
+        // once.
+        unsafe { crate::handle::close(job).unwrap() };
+    }
+
+    #[test]
+    fn limits_reports_none_for_anything_never_set() {
+        let job = create().expect("CreateJobObjectW should succeed");
+        // SAFETY: `job` is freshly created and valid; nothing has set any
+        // limit on it yet.
+        let limits_out = unsafe { limits(job) }.expect("QueryInformationJobObject should succeed");
+        assert_eq!(
+            limits_out,
+            JobLimits::default(),
+            "a fresh job should report every limit unset"
+        );
+        // SAFETY: `job` is a valid, currently-open handle, closed exactly
+        // once.
+        unsafe { crate::handle::close(job).unwrap() };
+    }
+
+    #[test]
+    fn accounting_reports_process_counts_after_a_process_exits() {
+        let job = create().expect("CreateJobObjectW should succeed");
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known system binary.
+        let spawned = unsafe { process::spawn_suspended("cmd.exe /c exit 0", false, false, None) }
+            .expect("CreateProcessW should succeed");
+        // SAFETY: `job`/`spawned.process` are both freshly created, valid
+        // handles; assignment happens before `resume`.
+        unsafe { assign(job, spawned.process) }.expect("AssignProcessToJobObject should succeed");
+        // SAFETY: `spawned.thread` is freshly created, valid, not yet
+        // resumed.
+        unsafe { process::resume(spawned.thread) }.expect("ResumeThread should succeed");
+        // SAFETY: `spawned.process` is a valid, currently-open handle.
+        unsafe { process::wait(spawned.process, None) }.unwrap();
+
+        // SAFETY: `job` is a valid handle.
+        let acc = unsafe { accounting(job) }.expect("QueryInformationJobObject should succeed");
+        assert_eq!(
+            acc.total_processes, 1,
+            "exactly one process was ever assigned to this job"
+        );
+        assert_eq!(
+            acc.active_processes, 0,
+            "the process has already exited, so none should remain active"
+        );
+        assert!(acc.total_user_time.nanos < 1_000_000_000);
+        assert!(acc.total_kernel_time.nanos < 1_000_000_000);
+
+        // SAFETY: every handle here is valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+            crate::handle::close(job).unwrap();
+        }
     }
 }

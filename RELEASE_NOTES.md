@@ -6,6 +6,29 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #47 — job: add resource-limit set/query and CPU/IO accounting
+**2026-07-23** · [#47](https://github.com/baileyrd/rusty_win32/pull/47)
+
+- **Added:** `job::set_resource_limits`/`job::limits` (memory, per-process
+  and per-job CPU-time, and active-process-count limits) and
+  `job::accounting` (`JobObjectBasicAndIoAccountingInformation`) — closes
+  the round-2 assessment's Job-Object item. `rush`'s `ulimit` is flat
+  "not supported" on Windows today; Job-Object limits are that crate's own
+  documented answer for the only realistic partial fix, and the struct
+  fields these use were already modeled bit-for-bit for
+  `set_kill_on_close`, just never set beyond its one `LimitFlags` bit.
+- `job::accounting` is Windows' real analog of POSIX `cutime`/`cstime`: CPU
+  time aggregated across every process a job has *ever* contained,
+  including already-exited ones — unlike `process::times`, which only
+  reports one still-open process handle's own times.
+- **Note:** `set_resource_limits` replaces the job's entire limit-info
+  block in one call, same as `set_kill_on_close`/`clear_kill_on_close` —
+  documented as a caveat rather than solved, since combining both concerns
+  in one `SetInformationJobObject` call is a separate primitive this PR
+  doesn't add.
+- `Timespec` (`time.rs`) gained a `Default` impl, needed for
+  `JobAccounting`'s derive.
+
 ## PR #46 — process: add GetProcessTimes wrapper (process::times)
 **2026-07-23** · [#46](https://github.com/baileyrd/rusty_win32/pull/46)
 
