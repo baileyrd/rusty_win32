@@ -70,6 +70,19 @@ unsafe extern "system" {
     fn SetConsoleOutputCP(code_page_id: u32) -> i32;
 }
 
+// `MapVirtualKeyW` lives in user32.dll, not kernel32.dll — this crate's
+// first non-kernel32 link (the README's own module docs already flag
+// `advapi32.dll` as an expected future addition; user32 is the same kind of
+// expansion, needed only for [`write_key_events`]'s scan-code lookup).
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn MapVirtualKeyW(code: u32, map_type: u32) -> u32;
+}
+
+/// `MapVirtualKeyW`'s `uMapType`: translate a virtual-key code to the
+/// hardware scan code a real keyboard driver would report for it.
+const MAPVK_VK_TO_VSC: u32 = 0;
+
 /// The UTF-8 code page identifier, for [`set_input_codepage`]/
 /// [`set_output_codepage`] — a console defaults to the system's legacy
 /// (OEM/ANSI) code page, which can mis-render non-ASCII bytes even once
@@ -506,6 +519,113 @@ pub unsafe fn write_char_events(handle: RawHandle, text: &str) -> Result<u32, Wi
     }
 }
 
+// Non-character virtual-key codes for [`write_key_events`] — arrows,
+// Home/End, and friends carry no `uChar` at all, so [`write_char_events`]
+// can't synthesize them; these are the ones a line editor's cursor/history
+// navigation or keymap most plausibly needs to test.
+pub const VK_PRIOR: u16 = 0x21;
+pub const VK_NEXT: u16 = 0x22;
+pub const VK_END: u16 = 0x23;
+pub const VK_HOME: u16 = 0x24;
+pub const VK_LEFT: u16 = 0x25;
+pub const VK_UP: u16 = 0x26;
+pub const VK_RIGHT: u16 = 0x27;
+pub const VK_DOWN: u16 = 0x28;
+pub const VK_INSERT: u16 = 0x2D;
+pub const VK_DELETE: u16 = 0x2E;
+pub const VK_F1: u16 = 0x70;
+pub const VK_F2: u16 = 0x71;
+pub const VK_F3: u16 = 0x72;
+pub const VK_F4: u16 = 0x73;
+pub const VK_F5: u16 = 0x74;
+pub const VK_F6: u16 = 0x75;
+pub const VK_F7: u16 = 0x76;
+pub const VK_F8: u16 = 0x77;
+pub const VK_F9: u16 = 0x78;
+pub const VK_F10: u16 = 0x79;
+pub const VK_F11: u16 = 0x7A;
+pub const VK_F12: u16 = 0x7B;
+
+/// `KEY_EVENT_RECORD.dwControlKeyState` bit a real keyboard driver always
+/// sets for the navigation-cluster keys ([`VK_PRIOR`]/[`VK_NEXT`]/
+/// [`VK_END`]/[`VK_HOME`]/[`VK_LEFT`]/[`VK_UP`]/[`VK_RIGHT`]/[`VK_DOWN`]/
+/// [`VK_INSERT`]/[`VK_DELETE`]) — distinguishes them from their
+/// numeric-keypad counterparts. [`write_key_events`] sets this
+/// automatically for those keys rather than leaving a caller to remember
+/// it, the one place this module deviates from its usual "thin,
+/// policy-free wrapper" rule, since a real driver never *not* sets it for
+/// these keys — there's no real policy choice here to leave to the caller.
+pub const ENHANCED_KEY: u32 = 0x0100;
+
+/// Synthesize one non-character key (arrows, Home/End, function keys, …) —
+/// `WriteConsoleInputW`, the virtual-key-code counterpart to
+/// [`write_char_events`]. `control_key_state` carries modifier bits (Shift/
+/// Ctrl/Alt — not named as constants here, since Windows' own
+/// `KEY_EVENT_RECORD.dwControlKeyState` values are already documented
+/// bit-for-bit and this is a thin passthrough); pass `0` for an unmodified
+/// keypress. [`ENHANCED_KEY`] is OR'd in automatically for the
+/// navigation-cluster keys listed on its own doc — a caller doesn't need to
+/// set it themselves.
+///
+/// The hardware scan code Windows pairs with `virtual_key_code` is looked
+/// up via `MapVirtualKeyW` rather than left as `0` — the same "queue what a
+/// real keyboard driver would" fidelity [`write_char_events`]'s own doc
+/// describes, just extended to the one field that primitive never needed
+/// (a character key's scan code is immaterial to VT translation the way a
+/// non-character key's is).
+///
+/// # Safety
+///
+/// `handle` must be a currently-open, valid console input handle.
+pub unsafe fn write_key_events(
+    handle: RawHandle,
+    virtual_key_code: u16,
+    control_key_state: u32,
+) -> Result<u32, Win32Error> {
+    let is_enhanced = matches!(
+        virtual_key_code,
+        VK_PRIOR
+            | VK_NEXT
+            | VK_END
+            | VK_HOME
+            | VK_LEFT
+            | VK_UP
+            | VK_RIGHT
+            | VK_DOWN
+            | VK_INSERT
+            | VK_DELETE
+    );
+    let control_key_state = control_key_state | if is_enhanced { ENHANCED_KEY } else { 0 };
+
+    // SAFETY: `MAPVK_VK_TO_VSC` is the documented map-type constant for
+    // this direction; `virtual_key_code` is a plain value, not a pointer.
+    let scan_code = unsafe { MapVirtualKeyW(u32::from(virtual_key_code), MAPVK_VK_TO_VSC) } as u16;
+
+    let records = [1i32, 0i32].map(|key_down| InputRecordKeyEvent {
+        event_type: KEY_EVENT,
+        key_event: KeyEventRecord {
+            key_down,
+            repeat_count: 1,
+            virtual_key_code,
+            virtual_scan_code: scan_code,
+            unicode_char: 0,
+            control_key_state,
+        },
+    });
+
+    let mut written: u32 = 0;
+    // SAFETY: `handle` is caller-supplied per this function's own safety
+    // contract; `records` is a valid, fully-initialized 2-element buffer;
+    // `written` is a valid out-pointer.
+    let ok =
+        unsafe { WriteConsoleInputW(handle, records.as_ptr(), records.len() as u32, &mut written) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(written)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,6 +854,47 @@ mod tests {
             &buf[..n],
             text.as_bytes(),
             "raw-mode VT-input-mode read should return the same bytes a real keypress would"
+        );
+
+        // SAFETY: `stdin` is still the same valid handle; restoring the
+        // original mode so this test doesn't leak state into others.
+        unsafe { set_mode(stdin, original) }.expect("restoring the original mode should succeed");
+    }
+
+    /// The empirical validation `write_key_events` exists for: the left
+    /// arrow key carries no `uChar` at all — exactly the case
+    /// `write_char_events`'s own doc names as out of its scope — so this
+    /// proves the virtual-key-code path round-trips through VT translation
+    /// the same way `write_char_events_round_trips_through_raw_mode_read`
+    /// already proves for character keys. `\x1b[D` is the standard VT100
+    /// cursor-left sequence (ANSI/DEC-documented, not a Windows-specific
+    /// guess) that every VT/ANSI-aware reader (including `rusty_lines`'
+    /// own) already expects for a left-arrow keypress.
+    #[test]
+    fn write_key_events_left_arrow_round_trips_as_the_vt_escape_sequence() {
+        let stdin = ensure_console_stdin();
+        // SAFETY: `stdin` is a real, valid console input handle.
+        let original = unsafe { get_mode(stdin) }.expect("GetConsoleMode should succeed");
+        let raw = (original & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT))
+            | ENABLE_VIRTUAL_TERMINAL_INPUT
+            | ENABLE_EXTENDED_FLAGS;
+        // SAFETY: `stdin` is the same valid handle; `raw` is a plain
+        // bitmask derived from a mode Windows itself just reported valid.
+        unsafe { set_mode(stdin, raw) }.expect("SetConsoleMode should succeed");
+
+        // SAFETY: `stdin` is the same valid, real console input handle.
+        let written = unsafe { write_key_events(stdin, VK_LEFT, 0) }
+            .expect("WriteConsoleInputW should succeed");
+        assert_eq!(written, 2, "one down+up pair for a single key");
+
+        let mut buf = [0u8; 16];
+        // SAFETY: `stdin` is the same valid handle; `buf` is a valid,
+        // writable buffer.
+        let n = unsafe { read(stdin, &mut buf) }.expect("ReadFile should succeed");
+        assert_eq!(
+            &buf[..n],
+            b"\x1b[D",
+            "left arrow should round-trip as the standard VT cursor-left escape sequence"
         );
 
         // SAFETY: `stdin` is still the same valid handle; restoring the
