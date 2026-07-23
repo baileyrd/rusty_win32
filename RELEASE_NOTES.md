@@ -6,6 +6,25 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #49 — console: add write_key_events for non-character virtual-key codes
+**2026-07-23** · [#49](https://github.com/baileyrd/rusty_win32/pull/49)
+
+- **Added:** `console::write_key_events`, extending `write_char_events`'s
+  test-input-synthesis technique to non-character keys (arrows, Home/End,
+  function keys, …) that carry no `uChar` at all — closes the round-2
+  assessment's last item. Blocked a Windows-side test suite for
+  `rusty_lines`' history/cursor/keymap navigation until now.
+- Adds the `VK_*` virtual-key-code constants and `ENHANCED_KEY` (auto-set
+  for the navigation-cluster keys, matching what a real keyboard driver
+  always sets for them).
+- Looks up a real hardware scan code via `MapVirtualKeyW` rather than
+  leaving it `0` — this crate's first non-`kernel32` link (`user32.dll`),
+  an expansion the README's own module docs already anticipated (alongside
+  `advapi32.dll`).
+- New test empirically proves the left-arrow key round-trips through
+  `ENABLE_VIRTUAL_TERMINAL_INPUT` translation as the standard VT100
+  cursor-left escape sequence (`\x1b[D`).
+
 ## PR #48 — Add pipe module: named pipes (CreateNamedPipeW/ConnectNamedPipeW/WaitNamedPipeW)
 **2026-07-23** · [#48](https://github.com/baileyrd/rusty_win32/pull/48)
 

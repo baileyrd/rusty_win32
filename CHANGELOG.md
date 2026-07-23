@@ -18,6 +18,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `pipe` module: named pipes (`CreateNamedPipeW`/`ConnectNamedPipeW`/
   `WaitNamedPipeW`/`CreateFileW`), the primitive rush's deferred process
   substitution (`<(cmd)`) and `coproc` support need on Windows.
+- `console::write_key_events` (`WriteConsoleInputW` for non-character keys —
+  arrows, Home/End, function keys, …) plus the `VK_*`/`ENHANCED_KEY`
+  constants it uses. First non-`kernel32` link in this crate
+  (`user32.dll`'s `MapVirtualKeyW`).
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
