@@ -205,14 +205,20 @@
 //! `coproc` support on Windows, since [`handle::create_pipe`]'s anonymous
 //! pipes have no name an arbitrary already-running program can open.
 //!
-//! [`console::write_key_events`] rounds out the round-2 assessment's last
-//! item, extending [`console::write_char_events`]'s test-input-synthesis
-//! technique to the one case its own doc names as out of scope:
-//! non-character keys (arrows, Home/End, function keys, …) that carry no
-//! `uChar` at all. This crate's first non-`kernel32` link
+//! [`console::write_key_events`] closes the round-2 assessment's last
+//! must-/nice-to-have item, extending [`console::write_char_events`]'s
+//! test-input-synthesis technique to the one case its own doc names as out
+//! of scope: non-character keys (arrows, Home/End, function keys, …) that
+//! carry no `uChar` at all. This crate's first non-`kernel32` link
 //! (`user32.dll`'s `MapVirtualKeyW`, for a real hardware scan code) — the
 //! README's own module docs already flagged `advapi32.dll` as an expected
 //! future addition; this is the same kind of expansion.
+//!
+//! [`volume`] (`GetLogicalDrives`/`GetDriveTypeW`/`GetVolumeInformationW`)
+//! rounds out the round-2 assessment's remaining speculative items: a
+//! distinctly Windows-shaped gap (Windows' multi-root filesystem model has
+//! no Unix analog at all) flagged for completeness rather than because any
+//! current `rush`/`rusty_lines` call site needs it yet.
 //!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
@@ -280,3 +286,10 @@ pub mod fs;
 // `rusty_win32::pipe::*`.
 #[cfg(windows)]
 pub mod pipe;
+
+// `volume`'s several-item surface (three functions, a result struct, and
+// the `DriveType` enum) is deliberately not re-exported at the crate root
+// either, for the same reason as `job`'s/`fs`'s/`pipe`'s — reach it via
+// `rusty_win32::volume::*`.
+#[cfg(windows)]
+pub mod volume;

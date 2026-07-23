@@ -22,6 +22,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   arrows, Home/End, function keys, …) plus the `VK_*`/`ENHANCED_KEY`
   constants it uses. First non-`kernel32` link in this crate
   (`user32.dll`'s `MapVirtualKeyW`).
+- `volume` module: drive/volume enumeration (`GetLogicalDrives`/
+  `GetDriveTypeW`/`GetVolumeInformationW`) — a distinctly Windows-shaped
+  primitive (multi-root filesystem, no Unix analog) with no current
+  consumer, added for completeness.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
