@@ -499,6 +499,15 @@ mod tests {
         assert_eq!(&buf[..n], b"rusty_win32");
     }
 
+    /// Both `transact`/`call` tests below run their server and client
+    /// halves on independent threads and wait on this bounded timeout
+    /// rather than a plain `.join()` — a previous version of these tests
+    /// hung a CI job for its full runner timeout (rather than failing
+    /// fast) when a pipe-mode mismatch left a fully synchronous,
+    /// no-timeout Win32 call blocked forever. This turns any future
+    /// regression of that kind into a clear, fast test failure instead.
+    const PIPE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
     #[test]
     fn transact_writes_and_reads_a_response_in_one_call() {
         let name = "rusty_win32_test_pipe_transact";
@@ -511,7 +520,9 @@ mod tests {
             512,
         )
         .expect("CreateNamedPipeW should succeed");
+        let server = server as usize;
 
+        let (client_tx, client_rx) = std::sync::mpsc::channel();
         let client_thread = std::thread::spawn(move || {
             wait_for_server(name, 5_000).expect("WaitNamedPipeW should succeed");
             let client = open_client(name, GENERIC_READ | GENERIC_WRITE)
@@ -521,31 +532,45 @@ mod tests {
             // duplex named-pipe handle; this is the operation under test.
             let bytes_read = unsafe { transact(client, b"ping", &mut response) }
                 .expect("TransactNamedPipe should succeed");
-            (client as usize, bytes_read, response)
+            let _ = client_tx.send((client as usize, bytes_read, response));
         });
 
-        // SAFETY: `server` is freshly created via `create_server` above,
-        // not yet connected.
-        unsafe { connect_server(server) }.expect("ConnectNamedPipeW should succeed");
+        let (server_tx, server_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let server = server as RawHandle;
+            // SAFETY: `server` is freshly created via `create_server`
+            // above, not yet connected.
+            unsafe { connect_server(server) }.expect("ConnectNamedPipeW should succeed");
+            // SAFETY: `server` is freshly created, valid, and uniquely
+            // owned here — nothing else holds or will close it.
+            let mut server_file =
+                std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(server as _) });
+            let mut request = [0u8; 4];
+            server_file
+                .read_exact(&mut request)
+                .expect("reading the client's request should succeed");
+            server_file
+                .write_all(b"pong")
+                .expect("writing the response should succeed");
+            let _ = server_tx.send(request);
+        });
 
-        // SAFETY: `server` is freshly created, valid, and uniquely owned
-        // here — nothing else holds or will close it.
-        let mut server_file =
-            std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(server as _) });
-        let mut request = [0u8; 4];
-        server_file
-            .read_exact(&mut request)
-            .expect("reading the client's request should succeed");
+        let request = server_rx
+            .recv_timeout(PIPE_TEST_TIMEOUT)
+            .expect("server side timed out — possible named-pipe deadlock");
         assert_eq!(&request, b"ping");
-        server_file
-            .write_all(b"pong")
-            .expect("writing the response should succeed");
-
-        let (client, bytes_read, response) = client_thread
-            .join()
-            .expect("client thread should not panic");
+        let (client, bytes_read, response) = client_rx
+            .recv_timeout(PIPE_TEST_TIMEOUT)
+            .expect("client side timed out — possible named-pipe deadlock");
         assert_eq!(bytes_read, 4);
         assert_eq!(&response, b"pong");
+
+        server_thread
+            .join()
+            .expect("server thread should not panic");
+        client_thread
+            .join()
+            .expect("client thread should not panic");
 
         // SAFETY: `client` is still a valid, currently-open handle, closed
         // exactly once and not used again after this.
@@ -564,37 +589,54 @@ mod tests {
             512,
         )
         .expect("CreateNamedPipeW should succeed");
+        let server = server as usize;
 
+        let (client_tx, client_rx) = std::sync::mpsc::channel();
         let client_thread = std::thread::spawn(move || {
             let mut response = [0u8; 4];
             let bytes_read =
                 call(name, b"ping", &mut response, 5_000).expect("CallNamedPipeW should succeed");
-            (bytes_read, response)
+            let _ = client_tx.send((bytes_read, response));
         });
 
-        // SAFETY: `server` is freshly created via `create_server` above,
-        // not yet connected. `CallNamedPipeW` itself calls `WaitNamedPipeW`
-        // internally, so no separate wait is needed on the client side.
-        unsafe { connect_server(server) }.expect("ConnectNamedPipeW should succeed");
+        let (server_tx, server_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let server = server as RawHandle;
+            // SAFETY: `server` is freshly created via `create_server`
+            // above, not yet connected. `CallNamedPipeW` itself calls
+            // `WaitNamedPipeW` internally, so no separate wait is needed
+            // on the client side.
+            unsafe { connect_server(server) }.expect("ConnectNamedPipeW should succeed");
+            // SAFETY: `server` is freshly created, valid, and uniquely
+            // owned here — nothing else holds or will close it.
+            let mut server_file =
+                std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(server as _) });
+            let mut request = [0u8; 4];
+            server_file
+                .read_exact(&mut request)
+                .expect("reading the client's request should succeed");
+            server_file
+                .write_all(b"pong")
+                .expect("writing the response should succeed");
+            let _ = server_tx.send(request);
+        });
 
-        // SAFETY: `server` is freshly created, valid, and uniquely owned
-        // here — nothing else holds or will close it.
-        let mut server_file =
-            std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(server as _) });
-        let mut request = [0u8; 4];
-        server_file
-            .read_exact(&mut request)
-            .expect("reading the client's request should succeed");
+        let request = server_rx
+            .recv_timeout(PIPE_TEST_TIMEOUT)
+            .expect("server side timed out — possible named-pipe deadlock");
         assert_eq!(&request, b"ping");
-        server_file
-            .write_all(b"pong")
-            .expect("writing the response should succeed");
-
-        let (bytes_read, response) = client_thread
-            .join()
-            .expect("client thread should not panic");
+        let (bytes_read, response) = client_rx
+            .recv_timeout(PIPE_TEST_TIMEOUT)
+            .expect("client side timed out — possible named-pipe deadlock");
         assert_eq!(bytes_read, 4);
         assert_eq!(&response, b"pong");
+
+        server_thread
+            .join()
+            .expect("server thread should not panic");
+        client_thread
+            .join()
+            .expect("client thread should not panic");
     }
 
     #[test]

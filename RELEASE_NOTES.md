@@ -26,6 +26,13 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
   server's creation-time mode). Caught by an abnormally long
   `windows-latest` CI run (~25 min vs. this workflow's usual ~1 min),
   cancelled and re-run after the fix.
+- **Fixed:** the same two tests still hung a second `windows-latest` run
+  after the fix above (~21 min), confirming the deadlock risk wasn't
+  fully understood. Rather than guess a third specific cause, both tests
+  now run their server/client halves on independent threads
+  communicating over a channel with a 10-second `recv_timeout`, instead
+  of a plain `.join()` with no bound — a real deadlock now fails the test
+  in ~10s with a clear message instead of hanging the whole CI job again.
 
 ## PR #202 — pipe: add pipe_info (GetNamedPipeInfo)
 **2026-07-23** · [#202](https://github.com/baileyrd/rusty_win32/pull/202)
