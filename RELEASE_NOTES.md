@@ -6,6 +6,19 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #223 — registry: add flush_key
+**2026-07-23** · [#223](https://github.com/baileyrd/rusty_win32/pull/223)
+
+- **Added:** `registry::flush_key` (`RegFlushKey`), closing issue #152 —
+  force a key's changes to disk immediately instead of Windows' lazy
+  flush, the registry analog of `FlushFileBuffers`. A real durability gap
+  for settings writes right before a risky operation (e.g. right before
+  terminating the process) — expensive, so documented (matching
+  Microsoft's own guidance) as something to call only when durability
+  genuinely matters, not as routine practice after every write. This
+  completes the `registry` module's round-2 item list (issues
+  #142-#152); the next round-2 subsystem is `security`.
+
 ## PR #222 — registry: add key_info
 **2026-07-23** · [#222](https://github.com/baileyrd/rusty_win32/pull/222)
 
