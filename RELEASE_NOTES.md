@@ -17,6 +17,15 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
   `ERROR_FILE_NOT_FOUND`. `REG_CREATED_NEW_KEY`/`REG_OPENED_EXISTING_KEY`/
   `REG_OPTION_NON_VOLATILE` verified against mingw-w64's real `winnt.h`
   macros.
+- **Fixed:** a CI-caught real environmental fact in this PR's own new
+  test: this crate's CI job runs `cargo test` twice (no-default-features,
+  then `--features std`) on the *same* Windows VM, and unlike this
+  crate's temp-file-backed tests, there was no `delete_key` yet to clean
+  up the registry subkey the first invocation created — so the second
+  invocation's own instance of the test found the subkey already existing
+  and failed asserting `CreatedNewKey`. Fixed by uniquifying the subkey
+  name with the test process's own pid, guaranteeing a fresh key every
+  invocation regardless of what an earlier one left behind.
 
 ## PR #214 — registry: add open_key/close_key
 **2026-07-23** · [#214](https://github.com/baileyrd/rusty_win32/pull/214)

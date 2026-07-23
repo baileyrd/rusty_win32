@@ -282,7 +282,21 @@ mod tests {
         // `HKEY_CURRENT_USER\Software` is writable by an ordinary,
         // non-elevated process — unlike `HKEY_LOCAL_MACHINE`, which
         // `open_key`'s tests above only ever read from.
-        let subkey = "Software\\rusty_win32_registry_test_create_key";
+        //
+        // Uniquified by this test process's own pid: this crate's CI job
+        // runs `cargo test` twice (once per feature set) on the *same*
+        // Windows VM, and unlike a temp-file-backed test, there's no
+        // `delete_key` yet to clean this up afterward — a fixed subkey
+        // name created by the first `cargo test` invocation would still
+        // exist when the second invocation's own instance of this test
+        // ran, making its "first call creates" assertion fail with
+        // `OpenedExistingKey` instead. Confirmed by exactly that failure
+        // in this crate's own CI.
+        let subkey = format!(
+            "Software\\rusty_win32_registry_test_create_key_{}",
+            std::process::id()
+        );
+        let subkey = subkey.as_str();
 
         // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid root.
         let (first, first_disposition) =
