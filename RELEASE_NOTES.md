@@ -6,6 +6,34 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #201 — handle: add same_object (CompareObjectHandles)
+**2026-07-23** · [#201](https://github.com/baileyrd/rusty_win32/pull/201)
+
+- **Added:** `handle::same_object` (`CompareObjectHandles`), closing issue
+  #130 — the documented-correct way to ask Windows whether two handle
+  values refer to the same kernel object, since comparing raw handle
+  values isn't guaranteed reliable (values get reused, and `duplicate`
+  can validly produce a second value for the same object). Another
+  round-2 "weak/no clear consumer" item (`gap-analysis.md`); no current
+  `rush` feature asks for this.
+- **Fixed:** a real CI-caught linker failure (`LNK2019: unresolved
+  external symbol __imp_CompareObjectHandles`) on this crate's own
+  `windows-latest` runner: some Windows SDK versions' `kernel32.lib`
+  import library omits a static stub for this symbol despite it being a
+  real, always-present `kernel32.dll` export. Fixed by resolving it via
+  `GetProcAddress` at call time instead of this crate's usual static
+  `#[link]` import — new territory for this crate, but scoped to this one
+  function. `same_object`'s signature changed to `Result<bool,
+  Win32Error>` to report the (practically unreachable) case where the
+  lookup itself fails.
+- **Fixed:** a second CI-caught issue in the same run, once the link
+  failure above was fixed: `GetProcAddress` against `kernel32.dll` alone
+  reported `ERROR_PROC_NOT_FOUND` on this runner too — `kernel32.dll`
+  doesn't always forward this symbol by name in a way `GetProcAddress`
+  resolves, even though the function genuinely exists (implemented in
+  `KernelBase.dll`). Fixed by trying `KernelBase.dll` as a fallback module
+  if the `kernel32.dll` lookup fails.
+
 ## PR #200 — fs: add compressed_file_size (GetCompressedFileSizeW)
 **2026-07-23** · [#200](https://github.com/baileyrd/rusty_win32/pull/200)
 

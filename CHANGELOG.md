@@ -152,6 +152,14 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `fs::compressed_file_size` (`GetCompressedFileSizeW`), the on-disk
   (NTFS-compressed) size of a file vs. `fs::stat`'s logical size —
   another round-2 item.
+- `handle::same_object` (`CompareObjectHandles`), the documented-correct
+  way to ask Windows whether two handle values refer to the same kernel
+  object — another round-2 item. Resolved via `GetProcAddress` at call
+  time rather than this crate's usual static `#[link]` import: some
+  Windows SDK versions' `kernel32.lib` omits a static stub for this
+  symbol even though it's a real, always-present `kernel32.dll` export,
+  which fails to link (caught by CI on this crate's own `windows-latest`
+  runner) rather than just failing at runtime.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
