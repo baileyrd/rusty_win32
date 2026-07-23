@@ -612,21 +612,48 @@ pub unsafe fn same_object(first: RawHandle, second: RawHandle) -> Result<bool, W
         b'l' as u16,
         0,
     ];
+    // `CompareObjectHandles` is genuinely implemented in `KernelBase.dll`;
+    // `kernel32.dll` normally just forwards to it, but this crate's own CI
+    // (`windows-latest`) confirmed a real machine where `GetProcAddress`
+    // against `kernel32.dll` alone doesn't resolve it — so this module is
+    // tried second, as a fallback, rather than relied on as the primary.
+    const KERNELBASE: &[u16] = &[
+        b'k' as u16,
+        b'e' as u16,
+        b'r' as u16,
+        b'n' as u16,
+        b'e' as u16,
+        b'l' as u16,
+        b'b' as u16,
+        b'a' as u16,
+        b's' as u16,
+        b'e' as u16,
+        b'.' as u16,
+        b'd' as u16,
+        b'l' as u16,
+        b'l' as u16,
+        0,
+    ];
     const PROC_NAME: &[u8] = b"CompareObjectHandles\0";
-    // SAFETY: `KERNEL32` is a valid, NUL-terminated UTF-16 string naming a
-    // module that's always already loaded in any Win32 process.
-    let module = unsafe { GetModuleHandleW(KERNEL32.as_ptr()) };
-    if module.is_null() {
-        return Err(Win32Error::last());
-    }
-    // SAFETY: `module` is a valid module handle just obtained above;
-    // `PROC_NAME` is a valid, NUL-terminated ASCII string.
-    let proc = unsafe { GetProcAddress(module, PROC_NAME.as_ptr()) };
-    if proc.is_null() {
+
+    // SAFETY: both name arrays are valid, NUL-terminated UTF-16 strings
+    // naming modules that are always already loaded in any Win32 process
+    // (`kernelbase.dll` is `kernel32.dll`'s own dependency).
+    let proc = [KERNEL32, KERNELBASE].into_iter().find_map(|name| {
+        let module = unsafe { GetModuleHandleW(name.as_ptr()) };
+        if module.is_null() {
+            return None;
+        }
+        // SAFETY: `module` is a valid module handle just obtained above;
+        // `PROC_NAME` is a valid, NUL-terminated ASCII string.
+        let proc = unsafe { GetProcAddress(module, PROC_NAME.as_ptr()) };
+        if proc.is_null() { None } else { Some(proc) }
+    });
+    let Some(proc) = proc else {
         // ERROR_PROC_NOT_FOUND — Windows' own documented code for this,
         // not a distinct error this crate invents.
         return Err(Win32Error::from_raw(127));
-    }
+    };
     // SAFETY: `proc` is a non-null pointer `GetProcAddress` reported for
     // `"CompareObjectHandles"`, which has this exact signature per its
     // documented prototype; both handles are caller-supplied per this

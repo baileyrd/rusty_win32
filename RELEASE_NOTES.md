@@ -26,6 +26,13 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
   function. `same_object`'s signature changed to `Result<bool,
   Win32Error>` to report the (practically unreachable) case where the
   lookup itself fails.
+- **Fixed:** a second CI-caught issue in the same run, once the link
+  failure above was fixed: `GetProcAddress` against `kernel32.dll` alone
+  reported `ERROR_PROC_NOT_FOUND` on this runner too — `kernel32.dll`
+  doesn't always forward this symbol by name in a way `GetProcAddress`
+  resolves, even though the function genuinely exists (implemented in
+  `KernelBase.dll`). Fixed by trying `KernelBase.dll` as a fallback module
+  if the `kernel32.dll` lookup fails.
 
 ## PR #200 — fs: add compressed_file_size (GetCompressedFileSizeW)
 **2026-07-23** · [#200](https://github.com/baileyrd/rusty_win32/pull/200)
