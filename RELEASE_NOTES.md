@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #104 — process: add logical_processor_count (GetSystemInfo)
+**2026-07-23** · [#104](https://github.com/baileyrd/rusty_win32/pull/104)
+
+- **Added:** `process::logical_processor_count` (`GetSystemInfo`'s
+  `dwNumberOfProcessors`), closing issue #71 from the parity-loop sweep —
+  the primitive behind an `nproc`-equivalent builtin. No `Result`:
+  `GetSystemInfo` has no documented failure mode, matching this crate's
+  already-established "never fails" pattern. `SYSTEM_INFO`'s layout
+  independently verified via a compiled mingw-w64 C probe, matching this
+  crate's usual FFI-struct verification discipline.
+
 ## PR #103 — process: add sleep_ms (Sleep)
 **2026-07-23** · [#103](https://github.com/baileyrd/rusty_win32/pull/103)
 
