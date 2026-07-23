@@ -77,6 +77,7 @@ unsafe extern "system" {
     fn FlushConsoleInputBuffer(console_input: RawHandle) -> i32;
     fn GetNumberOfConsoleInputEvents(console_input: RawHandle, number_of_events: *mut u32) -> i32;
     fn GetConsoleProcessList(process_list: *mut u32, process_count: u32) -> u32;
+    fn GetConsoleWindow() -> *mut core::ffi::c_void;
     fn WaitForSingleObject(handle: RawHandle, milliseconds: u32) -> u32;
     fn WriteConsoleInputW(
         console_input: RawHandle,
@@ -704,6 +705,22 @@ pub fn process_list() -> Result<alloc::vec::Vec<u32>, Win32Error> {
     Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
 }
 
+/// The `HWND` of the console window attached to the calling process, if
+/// any — `GetConsoleWindow`. `None` for a process with no console window
+/// (e.g. a headless/service process). Manipulating the window itself
+/// (position/focus/etc.) via ordinary `user32` window APIs is out of this
+/// crate's scope beyond returning the handle. No `Result`: `GetConsoleWindow`
+/// has no documented failure mode beyond the `None` case itself, matching
+/// this crate's already-established "never fails" pattern (e.g.
+/// `GetDriveTypeW`). No current `rush` feature asks for this; filed for
+/// Win32 parity.
+pub fn window_handle() -> Option<*mut core::ffi::c_void> {
+    // SAFETY: `GetConsoleWindow` takes no arguments and has no
+    // precondition.
+    let hwnd = unsafe { GetConsoleWindow() };
+    if hwnd.is_null() { None } else { Some(hwnd) }
+}
+
 /// Synthesize `text` as a sequence of real console key events —
 /// `WriteConsoleInputW`, the standard, documented technique console
 /// automation tools use to inject keystrokes (queues `INPUT_RECORD`s into
@@ -1114,6 +1131,23 @@ mod tests {
         assert!(
             pids.contains(&crate::process::current_pid()),
             "the calling process should be attached to its own console, got: {pids:?}"
+        );
+    }
+
+    #[test]
+    fn window_handle_is_stable_across_repeated_calls() {
+        let _ = ensure_console_stdin(); // guarantee a console exists first
+        // `GetConsoleWindow` can validly return `NULL` even once a console
+        // exists — not every hosting scenario (e.g. a non-interactive CI
+        // runner's session) attaches a real window to it, confirmed by
+        // this exact assumption failing on this crate's own
+        // `windows-latest` CI runner. So this only checks that repeated
+        // calls agree with each other, not that the handle is non-null.
+        let first = window_handle();
+        let second = window_handle();
+        assert_eq!(
+            first, second,
+            "GetConsoleWindow should report the same answer on repeated calls"
         );
     }
 
