@@ -50,6 +50,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   described but this crate didn't yet own; another parity-loop find.
 - `path::full_path` (`GetFullPathNameW`), resolving a relative path to its
   absolute form — another parity-loop find.
+- `process::process_id_of` (`GetProcessId`), the reverse of `open_by_pid`'s
+  pid-to-`HANDLE` mapping — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

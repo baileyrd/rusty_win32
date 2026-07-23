@@ -100,6 +100,7 @@ unsafe extern "system" {
     fn GetCurrentProcessId() -> u32;
     fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> RawHandle;
     fn TerminateProcess(process: RawHandle, exit_code: u32) -> i32;
+    fn GetProcessId(process: RawHandle) -> u32;
     fn GetProcessTimes(
         process: RawHandle,
         creation_time: *mut FileTime,
@@ -750,6 +751,28 @@ pub fn open_by_pid(pid: u32, desired_access: u32) -> Result<RawHandle, Win32Erro
     }
 }
 
+/// The numeric pid a process handle refers to — `GetProcessId`, the reverse
+/// of [`open_by_pid`]'s pid-to-`HANDLE` mapping. Needed anywhere a caller
+/// holds a `HANDLE` (e.g. `spawn_suspended`'s own `process` handle) and
+/// needs to report/print its numeric pid without having cached it
+/// separately.
+///
+/// # Safety
+///
+/// `process` must be a currently-open, valid process handle with the
+/// `PROCESS_QUERY_LIMITED_INFORMATION` access right (or better).
+pub unsafe fn process_id_of(process: RawHandle) -> Result<u32, Win32Error> {
+    // SAFETY: `process` is caller-supplied per this function's own safety
+    // contract; `GetProcessId` reports a failing handle as an ordinary
+    // `0`/`GetLastError` failure, not undefined behavior.
+    let pid = unsafe { GetProcessId(process) };
+    if pid == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(pid)
+    }
+}
+
 /// Terminate `process` with `exit_code` — `TerminateProcess`, the
 /// single-process counterpart to [`crate::job::terminate`] (which kills
 /// every process in a job at once). Needed for `kill <pid>` against a
@@ -910,6 +933,30 @@ mod tests {
     #[test]
     fn current_pid_is_nonzero() {
         assert_ne!(current_pid(), 0);
+    }
+
+    #[test]
+    fn process_id_of_spawned_process_matches_its_own_reported_pid() {
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known system binary.
+        let spawned = unsafe { spawn_suspended("cmd.exe /c exit 0", false, false, None) }
+            .expect("CreateProcessW should succeed");
+
+        // SAFETY: `spawned.process` is a freshly created, valid handle.
+        let pid = unsafe { process_id_of(spawned.process) }.expect("GetProcessId should succeed");
+        assert_eq!(pid, spawned.process_id);
+
+        // SAFETY: `spawned.thread` is freshly created, valid, not yet
+        // resumed.
+        unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
+        // SAFETY: `spawned.process` is a valid, currently-open handle.
+        unsafe { wait(spawned.process, None) }.unwrap();
+
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+        }
     }
 
     #[test]
