@@ -16,6 +16,16 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
   `wait_for_server`/`open_client`/`transact`/close for a caller that only
   needs one round trip. Another round-2 "weak/no clear consumer" item
   (`gap-analysis.md`); no current `rush` feature asks for this.
+- **Fixed:** a real CI hang (not a fast failure) in this PR's own new
+  tests: `transact`/`call`'s pipe was created with `PIPE_READMODE_BYTE`
+  even though `PIPE_TYPE_MESSAGE` was set, and `TransactNamedPipe`/
+  `CallNamedPipeW` are fully synchronous with no timeout — a read/write
+  mode mismatch left the call blocked forever instead of erroring.
+  Switched both new tests' pipes to `PIPE_READMODE_MESSAGE`, which a
+  freshly-connected client also starts in by default (mirroring the
+  server's creation-time mode). Caught by an abnormally long
+  `windows-latest` CI run (~25 min vs. this workflow's usual ~1 min),
+  cancelled and re-run after the fix.
 
 ## PR #202 — pipe: add pipe_info (GetNamedPipeInfo)
 **2026-07-23** · [#202](https://github.com/baileyrd/rusty_win32/pull/202)
