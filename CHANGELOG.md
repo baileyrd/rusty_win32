@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `registry::enum_values` (`RegEnumValueW`, sized via `RegQueryInfoKeyW`)
+  plus the `RegValueIter` iterator type and `Win32Error::ERROR_NO_MORE_ITEMS`
+  — enumerate every value under a key as `(String, RegistryValue)` pairs.
 - `registry::delete_key` (`RegDeleteKeyExW`) plus `KEY_WOW64_64KEY`/
   `KEY_WOW64_32KEY` — remove a leaf subkey (must have no subkeys of its
   own). Earlier registry tests now clean up the keys they create, now

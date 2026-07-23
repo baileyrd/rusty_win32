@@ -65,6 +65,30 @@ unsafe extern "system" {
     ) -> i32;
     fn RegDeleteValueW(key: HKey, value_name: *const u16) -> i32;
     fn RegDeleteKeyExW(key: HKey, sub_key: *const u16, sam_desired: u32, reserved: u32) -> i32;
+    fn RegQueryInfoKeyW(
+        key: HKey,
+        class: *mut u16,
+        class_len: *mut u32,
+        reserved: *mut u32,
+        sub_keys: *mut u32,
+        max_sub_key_len: *mut u32,
+        max_class_len: *mut u32,
+        values: *mut u32,
+        max_value_name_len: *mut u32,
+        max_value_len: *mut u32,
+        security_descriptor_len: *mut u32,
+        last_write_time: *mut core::ffi::c_void,
+    ) -> i32;
+    fn RegEnumValueW(
+        key: HKey,
+        index: u32,
+        value_name: *mut u16,
+        value_name_len: *mut u32,
+        reserved: *mut u32,
+        value_type: *mut u32,
+        data: *mut u8,
+        data_size: *mut u32,
+    ) -> i32;
 }
 
 /// `RegDeleteKeyExW`'s `samDesired` — on WOW64, a 32-bit process's
@@ -542,6 +566,157 @@ pub unsafe fn delete_key(
     }
 }
 
+/// An in-progress [`enum_values`] enumeration — the value-side analog of
+/// [`crate::fs::ReadDir`], but each item's name/data don't share one
+/// fixed-size record the way a directory entry does, so this holds its
+/// own growable name/data buffers instead of relying on the OS to size
+/// them per call.
+pub struct RegValueIter {
+    key: HKey,
+    index: u32,
+    name_buf: Vec<u16>,
+    data_buf: Vec<u8>,
+    done: bool,
+}
+
+impl Iterator for RegValueIter {
+    type Item = Result<(alloc::string::String, RegistryValue), crate::error::Win32Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        loop {
+            let mut name_len = self.name_buf.len() as u32;
+            let mut data_len = self.data_buf.len() as u32;
+            let mut value_type: u32 = 0;
+            // SAFETY: `self.key` is caller-supplied per `enum_values`'s
+            // own safety contract, and must still be open (this struct's
+            // own invariant, documented there); `name_buf`/`data_buf` are
+            // valid, writable buffers matched by `name_len`/`data_len`
+            // naming their exact lengths (the name buffer's length
+            // already accounts for `RegEnumValueW`'s documented
+            // "including the terminating null character" input
+            // convention, unlike the data buffer's plain byte count).
+            let status = unsafe {
+                RegEnumValueW(
+                    self.key,
+                    self.index,
+                    self.name_buf.as_mut_ptr(),
+                    &mut name_len,
+                    core::ptr::null_mut(),
+                    &mut value_type,
+                    self.data_buf.as_mut_ptr(),
+                    &mut data_len,
+                )
+            };
+            if status == 0 {
+                self.index += 1;
+                let name =
+                    alloc::string::String::from_utf16_lossy(&self.name_buf[..name_len as usize]);
+                let data = self.data_buf[..data_len as usize].to_vec();
+                let value = match value_type {
+                    REG_SZ => RegistryValue::Sz(decode_wide_string(&data)),
+                    REG_EXPAND_SZ => RegistryValue::ExpandSz(decode_wide_string(&data)),
+                    REG_DWORD => RegistryValue::Dword(decode_u32_le(&data)),
+                    REG_QWORD => RegistryValue::Qword(decode_u64_le(&data)),
+                    REG_MULTI_SZ => RegistryValue::MultiSz(decode_multi_sz(&data)),
+                    REG_BINARY => RegistryValue::Binary(data),
+                    _ => RegistryValue::None,
+                };
+                return Some(Ok((name, value)));
+            }
+            let err = crate::error::Win32Error::from_raw(status as u32);
+            if err == crate::error::Win32Error::ERROR_NO_MORE_ITEMS {
+                self.done = true;
+                return None;
+            }
+            if err == crate::error::Win32Error::ERROR_MORE_DATA {
+                // A value added after `enum_values`'s own initial sizing
+                // query (or, for the name buffer, one `RegEnumValueW`
+                // simply doesn't reliably report an exact required size
+                // for on this specific failure, unlike
+                // `RegQueryValueExW`) can still exceed what was
+                // allocated — grow whichever buffer(s) plausibly need it
+                // and retry the same index rather than trusting the
+                // reported sizes blindly.
+                if (name_len as usize) >= self.name_buf.len() {
+                    let grown = (name_len as usize + 1).max(self.name_buf.len() * 2);
+                    self.name_buf.resize(grown, 0);
+                } else {
+                    self.name_buf.resize(self.name_buf.len() * 2, 0);
+                }
+                if (data_len as usize) > self.data_buf.len() {
+                    self.data_buf.resize(data_len as usize, 0);
+                } else {
+                    self.data_buf.resize(self.data_buf.len().max(1) * 2, 0);
+                }
+                continue;
+            }
+            self.done = true;
+            return Some(Err(err));
+        }
+    }
+}
+
+/// Start enumerating every value under `key` — repeated `RegEnumValueW`
+/// calls, one per [`RegValueIter::next`], stopping at
+/// `ERROR_NO_MORE_ITEMS`. Queries `key`'s own reported maximum value
+/// name/data lengths up front (`RegQueryInfoKeyW`) to size the
+/// enumeration's buffers once rather than growing them from nothing on
+/// the first item; a value added concurrently that exceeds those
+/// maximums is still handled (see [`RegValueIter`]'s `next`), just less
+/// commonly.
+///
+/// # Safety
+///
+/// `key` must be a currently-valid `HKey` — one of the predefined roots
+/// in this module, or a key [`open_key`]/[`create_key`] previously
+/// returned — for the entire lifetime of the returned [`RegValueIter`],
+/// not merely for this call: the iterator holds `key` and calls
+/// `RegEnumValueW` on it again for every item it yields, so closing `key`
+/// before the iterator is done with it invalidates every subsequent
+/// `next()` call.
+pub unsafe fn enum_values(key: HKey) -> RegValueIter {
+    let mut max_value_name_len: u32 = 0;
+    let mut max_value_len: u32 = 0;
+    // SAFETY: `key` is caller-supplied per this function's own safety
+    // contract; every other out-pointer is null since this crate only
+    // wants the two value-sizing hints — documented-valid when the
+    // corresponding piece of information isn't wanted.
+    let status = unsafe {
+        RegQueryInfoKeyW(
+            key,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            &mut max_value_name_len,
+            &mut max_value_len,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        )
+    };
+    // A failed query (unusual, but not a documented impossibility for
+    // every kind of key) falls back to a small starting size — `next()`'s
+    // own `ERROR_MORE_DATA` growth handles it regardless either way.
+    let (name_cap, data_cap) = if status == 0 {
+        (max_value_name_len as usize + 1, max_value_len as usize)
+    } else {
+        (256, 256)
+    };
+    RegValueIter {
+        key,
+        index: 0,
+        name_buf: alloc::vec![0u16; name_cap.max(1)],
+        data_buf: alloc::vec![0u8; data_cap],
+        done: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -873,5 +1048,83 @@ mod tests {
         }
         .expect_err("RegDeleteKeyExW should fail for a nonexistent subkey");
         assert_eq!(err, crate::error::Win32Error::ERROR_FILE_NOT_FOUND);
+    }
+
+    #[test]
+    fn enum_values_reports_every_value_that_was_set() {
+        let subkey = format!(
+            "Software\\rusty_win32_registry_test_enum_values_{}",
+            std::process::id()
+        );
+        // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid root.
+        let (key, _disposition) =
+            unsafe { create_key(HKEY_CURRENT_USER, subkey.as_str(), KEY_ALL_ACCESS) }
+                .expect("RegCreateKeyExW should succeed");
+
+        let cases = [
+            ("alpha", RegistryValue::Sz("one".into())),
+            ("beta", RegistryValue::Dword(7)),
+            ("gamma", RegistryValue::Binary(alloc::vec![9, 8, 7])),
+        ];
+        for (name, value) in &cases {
+            // SAFETY: `key` was just created above, opened with
+            // `KEY_ALL_ACCESS`, and stays open for this whole loop.
+            unsafe { set_value(key, name, value) }
+                .unwrap_or_else(|e| panic!("RegSetValueExW should succeed for {name}: {e}"));
+        }
+
+        // SAFETY: `key` is still the same valid, currently-open handle,
+        // kept open for as long as the iterator below is used.
+        let mut found: alloc::vec::Vec<(alloc::string::String, RegistryValue)> =
+            unsafe { enum_values(key) }
+                .collect::<Result<_, _>>()
+                .expect("RegEnumValueW should succeed for every value");
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut expected: alloc::vec::Vec<(alloc::string::String, RegistryValue)> = cases
+            .iter()
+            .map(|(name, value)| ((*name).into(), value.clone()))
+            .collect();
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert_eq!(found, expected);
+
+        for (name, _) in &cases {
+            // SAFETY: `key` is still the same valid, currently-open
+            // handle.
+            unsafe { delete_value(key, name) }
+                .unwrap_or_else(|e| panic!("RegDeleteValueW should succeed for {name}: {e}"));
+        }
+        // SAFETY: same as above.
+        unsafe { close_key(key) }.expect("RegCloseKey should succeed");
+        // SAFETY: `HKEY_CURRENT_USER` is the same predefined root.
+        unsafe { delete_key(HKEY_CURRENT_USER, subkey.as_str(), 0) }
+            .expect("RegDeleteKeyExW should succeed");
+    }
+
+    #[test]
+    fn enum_values_reports_nothing_for_a_key_with_no_values() {
+        let subkey = format!(
+            "Software\\rusty_win32_registry_test_enum_values_empty_{}",
+            std::process::id()
+        );
+        // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid root.
+        let (key, _disposition) =
+            unsafe { create_key(HKEY_CURRENT_USER, subkey.as_str(), KEY_ALL_ACCESS) }
+                .expect("RegCreateKeyExW should succeed");
+
+        // SAFETY: `key` was just created above, opened with
+        // `KEY_ALL_ACCESS`, and stays open for as long as the iterator is
+        // used.
+        let found: alloc::vec::Vec<_> = unsafe { enum_values(key) }
+            .collect::<Result<alloc::vec::Vec<_>, _>>()
+            .expect("RegEnumValueW should succeed (by finding nothing) for a key with no values");
+        assert!(found.is_empty());
+
+        // SAFETY: `key` is still the same valid, currently-open handle.
+        unsafe { close_key(key) }.expect("RegCloseKey should succeed");
+        // SAFETY: `HKEY_CURRENT_USER` is the same predefined root.
+        unsafe { delete_key(HKEY_CURRENT_USER, subkey.as_str(), 0) }
+            .expect("RegDeleteKeyExW should succeed");
     }
 }

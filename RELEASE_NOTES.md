@@ -6,6 +6,20 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #220 — registry: add enum_values
+**2026-07-23** · [#220](https://github.com/baileyrd/rusty_win32/pull/220)
+
+- **Added:** `registry::enum_values` (`RegEnumValueW`) plus a new
+  `RegValueIter` iterator type, closing issue #149 — the value-side
+  analog of `fs::read_dir`'s iterator shape, yielding `(String,
+  RegistryValue)` pairs until `ERROR_NO_MORE_ITEMS`. Sizes its name/data
+  buffers once up front via `RegQueryInfoKeyW`'s reported maximums rather
+  than growing from nothing on the first item, with a defensive
+  `ERROR_MORE_DATA`-driven grow-and-retry fallback for a value added
+  concurrently that exceeds those maximums. Also adds
+  `Win32Error::ERROR_NO_MORE_ITEMS` (259), this crate's enumeration
+  end-of-sequence code.
+
 ## PR #219 — registry: add delete_key
 **2026-07-23** · [#219](https://github.com/baileyrd/rusty_win32/pull/219)
 
