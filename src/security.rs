@@ -75,6 +75,8 @@ unsafe extern "system" {
         domain_len: *mut u32,
         sid_name_use: *mut i32,
     ) -> i32;
+    fn ConvertSidToStringSidW(sid: *mut core::ffi::c_void, string_sid: *mut *mut u16) -> i32;
+    fn ConvertStringSidToSidW(string_sid: *const u16, sid: *mut *mut core::ffi::c_void) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -817,6 +819,88 @@ pub fn lookup_account_name(name: &str) -> Result<(SidBuf, AccountName), crate::e
     Ok((SidBuf { bytes: sid_bytes }, account))
 }
 
+/// Convert `sid` to its `S-1-5-...` string form — `ConvertSidToStringSidW`.
+/// The fallback `icacls` itself uses to display a SID that can't be
+/// resolved to a name (orphaned/foreign/deleted account) — see
+/// [`lookup_account_sid`] for the name-resolving path this is a fallback
+/// from. Frees `ConvertSidToStringSidW`'s own output buffer via
+/// `LocalFree` before returning, so the result is an ordinary owned
+/// `String` rather than another `LocalFree`-on-`Drop` wrapper.
+///
+/// # Safety
+///
+/// `sid` must be a valid `PSID` for the duration of this call.
+pub unsafe fn sid_to_string(
+    sid: *mut core::ffi::c_void,
+) -> Result<alloc::string::String, crate::error::Win32Error> {
+    let mut string_sid: *mut u16 = core::ptr::null_mut();
+    // SAFETY: `sid` is caller-supplied per this function's own safety
+    // contract; `string_sid` is a valid out-pointer.
+    let ok = unsafe { ConvertSidToStringSidW(sid, &mut string_sid) };
+    if ok == 0 {
+        return Err(crate::error::Win32Error::last());
+    }
+    // SAFETY: a successful call guarantees `string_sid` points to a
+    // NUL-terminated wide string allocated by this same call, not yet
+    // freed — walking it to find the NUL is safe.
+    let len = unsafe {
+        let mut n = 0usize;
+        while *string_sid.add(n) != 0 {
+            n += 1;
+        }
+        n
+    };
+    // SAFETY: `string_sid` points to `len` valid `u16`s per the walk just
+    // done, all still part of the same live allocation.
+    let text = alloc::string::String::from_utf16_lossy(unsafe {
+        core::slice::from_raw_parts(string_sid, len)
+    });
+    // SAFETY: `string_sid` is the exact pointer `ConvertSidToStringSidW`
+    // allocated for this call and hasn't been freed yet.
+    let _ = unsafe { LocalFree(string_sid.cast()) };
+    Ok(text)
+}
+
+/// [`string_to_sid`]'s result — the `PSID` `ConvertStringSidToSidW`
+/// allocated, freed via `LocalFree` on `Drop` the same way [`BuiltAcl`]
+/// frees the ACL `SetEntriesInAclW` allocates.
+#[derive(Debug)]
+pub struct ConvertedSid {
+    sid: *mut core::ffi::c_void,
+}
+
+impl ConvertedSid {
+    /// The parsed `PSID`, ready to pass to [`lookup_account_sid`],
+    /// [`sid_to_string`], or an [`ExplicitAccess`] entry's trustee.
+    pub fn as_ptr(&self) -> *mut core::ffi::c_void {
+        self.sid
+    }
+}
+
+impl Drop for ConvertedSid {
+    fn drop(&mut self) {
+        // SAFETY: `self.sid` is the exact `PSID` pointer
+        // `ConvertStringSidToSidW` allocated for this value and hasn't
+        // been freed yet — freed here exactly once, on this value's only
+        // path to being dropped.
+        let _ = unsafe { LocalFree(self.sid) };
+    }
+}
+
+/// Parse a `S-1-5-...` string SID back into a `PSID` —
+/// `ConvertStringSidToSidW`. The reverse of [`sid_to_string`].
+pub fn string_to_sid(s: &str) -> Result<ConvertedSid, crate::error::Win32Error> {
+    let wide: Vec<u16> = s.encode_utf16().chain(core::iter::once(0)).collect();
+    let mut sid: *mut core::ffi::c_void = core::ptr::null_mut();
+    // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string live for the
+    // whole call; `sid` is a valid out-pointer.
+    let ok = unsafe { ConvertStringSidToSidW(wide.as_ptr(), &mut sid) };
+    if ok == 0 {
+        return Err(crate::error::Win32Error::last());
+    }
+    Ok(ConvertedSid { sid })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1048,5 +1132,46 @@ mod tests {
             !resolved.name.is_empty(),
             "the round-tripped SID should resolve back to a non-empty account name"
         );
+    }
+
+    #[test]
+    fn sid_to_string_then_string_to_sid_round_trips_a_real_files_owner() {
+        let path = std::env::temp_dir().join("rusty_win32_security_test_sid_string.txt");
+        std::fs::write(&path, b"hello").expect("creating the test file should succeed");
+        let path_str = path.to_str().expect("temp path should be valid UTF-8");
+
+        let info = path_security_info(path_str, OWNER_SECURITY_INFORMATION)
+            .expect("GetNamedSecurityInfoW should succeed for a real file");
+        let owner = info.owner().expect("a real file should have an owner SID");
+
+        // SAFETY: `owner` is a valid `PSID` from `info`, which stays
+        // alive (not yet dropped) for this whole test.
+        let text = unsafe { sid_to_string(owner) }.expect("ConvertSidToStringSidW should succeed");
+        assert!(
+            text.starts_with("S-1-"),
+            "a Windows SID's string form should start with \"S-1-\", got: {text}"
+        );
+
+        let parsed =
+            string_to_sid(&text).expect("ConvertStringSidToSidW should succeed round-tripping");
+        // SAFETY: `owner` and `parsed`'s SID are both still alive for
+        // this whole call.
+        let original_account =
+            unsafe { lookup_account_sid(owner) }.expect("LookupAccountSidW should succeed");
+        let parsed_account = unsafe { lookup_account_sid(parsed.as_ptr()) }
+            .expect("LookupAccountSidW should succeed on the round-tripped SID");
+        assert_eq!(
+            original_account, parsed_account,
+            "the round-tripped SID should resolve to the same account as the original"
+        );
+
+        std::fs::remove_file(&path).expect("removing the test file should succeed");
+    }
+
+    #[test]
+    fn string_to_sid_fails_for_a_malformed_string() {
+        let err = string_to_sid("not a valid sid string")
+            .expect_err("ConvertStringSidToSidW should fail on malformed input");
+        assert_eq!(err, crate::error::Win32Error::ERROR_INVALID_SID);
     }
 }

@@ -154,6 +154,7 @@ win32_errors! {
     ERROR_PIPE_CONNECTED = 535 => "a client is connected to the pipe",
     ERROR_NOTIFY_ENUM_DIR = 1022 => "the buffer for the directory-change notifications overflowed",
     ERROR_NO_MORE_ITEMS = 259 => "no more data is available",
+    ERROR_INVALID_SID = 1337 => "the security ID structure is invalid",
 }
 
 impl core::error::Error for Win32Error {}

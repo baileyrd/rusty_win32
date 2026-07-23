@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `security::sid_to_string`/`security::string_to_sid`
+  (`ConvertSidToStringSidW`/`ConvertStringSidToSidW`) plus `ConvertedSid`
+  (freeing via `LocalFree` on `Drop`) — the `S-1-5-...` string form of a
+  SID, the fallback `icacls` itself uses when a SID can't be resolved to
+  a name (orphaned/foreign/deleted account).
 - `security::lookup_account_sid`/`security::lookup_account_name`
   (`LookupAccountSidW`/`LookupAccountNameW`) plus `AccountName`/
   `SidNameUse`/`SidBuf` — SID↔name resolution, turning an owner/ACE SID
