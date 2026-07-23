@@ -527,8 +527,17 @@ mod tests {
             wait_for_server(name, 5_000).expect("WaitNamedPipeW should succeed");
             let client = open_client(name, GENERIC_READ | GENERIC_WRITE)
                 .expect("CreateFileW should succeed");
+            // A freshly-opened client handle defaults to byte read mode
+            // regardless of the server's own creation-time dwPipeMode —
+            // TransactNamedPipe requires the calling handle itself to be
+            // in message read mode, confirmed by a real ERROR_BAD_PIPE
+            // (230) from a CI run without this call.
+            // SAFETY: `client` is a freshly opened, valid named-pipe
+            // handle.
+            unsafe { set_pipe_mode(client, PIPE_READMODE_MESSAGE) }
+                .expect("SetNamedPipeHandleState should succeed");
             let mut response = [0u8; 4];
-            // SAFETY: `client` is a freshly opened, valid, message-mode
+            // SAFETY: `client` is now a message-read-mode, message-type,
             // duplex named-pipe handle; this is the operation under test.
             let bytes_read = unsafe { transact(client, b"ping", &mut response) }
                 .expect("TransactNamedPipe should succeed");

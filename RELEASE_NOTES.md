@@ -21,11 +21,9 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
   even though `PIPE_TYPE_MESSAGE` was set, and `TransactNamedPipe`/
   `CallNamedPipeW` are fully synchronous with no timeout — a read/write
   mode mismatch left the call blocked forever instead of erroring.
-  Switched both new tests' pipes to `PIPE_READMODE_MESSAGE`, which a
-  freshly-connected client also starts in by default (mirroring the
-  server's creation-time mode). Caught by an abnormally long
-  `windows-latest` CI run (~25 min vs. this workflow's usual ~1 min),
-  cancelled and re-run after the fix.
+  Switched both new tests' pipes to `PIPE_READMODE_MESSAGE`. Caught by an
+  abnormally long `windows-latest` CI run (~25 min vs. this workflow's
+  usual ~1 min), cancelled and re-run after the fix.
 - **Fixed:** the same two tests still hung a second `windows-latest` run
   after the fix above (~21 min), confirming the deadlock risk wasn't
   fully understood. Rather than guess a third specific cause, both tests
@@ -33,6 +31,14 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
   communicating over a channel with a 10-second `recv_timeout`, instead
   of a plain `.join()` with no bound — a real deadlock now fails the test
   in ~10s with a clear message instead of hanging the whole CI job again.
+- **Fixed:** the watchdog above then reported the real root cause in
+  ~11s — `TransactNamedPipe` failed with a genuine `ERROR_BAD_PIPE`
+  (230), not a hang. The `call` test passed, isolating the bug to
+  `transact`: a freshly-opened client handle defaults to *byte* read
+  mode regardless of the server's creation-time `dwPipeMode` —
+  `TransactNamedPipe` specifically requires the *calling handle itself*
+  to be in message read mode. Fixed by calling `set_pipe_mode` on the
+  client (switching it to `PIPE_READMODE_MESSAGE`) before `transact`.
 
 ## PR #202 — pipe: add pipe_info (GetNamedPipeInfo)
 **2026-07-23** · [#202](https://github.com/baileyrd/rusty_win32/pull/202)
