@@ -6,6 +6,15 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #196 — process: add sleep_ms_ex (SleepEx)
+**2026-07-23** · [#196](https://github.com/baileyrd/rusty_win32/pull/196)
+
+- **Added:** `process::sleep_ms_ex` (`SleepEx`), closing issue #125 — the
+  alertable-sleep variant of `process::sleep_ms` (`Sleep`), reporting
+  `WAIT_IO_COMPLETION` if an APC woke the sleep early rather than the full
+  duration elapsing. Another round-2 "weak/no clear consumer" item
+  (`gap-analysis.md`); no current `rush` feature uses APCs.
+
 ## PR #195 — handle: add wait_single_ex/wait_multiple_ex (WaitForSingleObjectEx/WaitForMultipleObjectsEx)
 **2026-07-23** · [#195](https://github.com/baileyrd/rusty_win32/pull/195)
 
