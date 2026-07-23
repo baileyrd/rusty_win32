@@ -6,6 +6,18 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #233 — security: add sid_equal
+**2026-07-23** · [#233](https://github.com/baileyrd/rusty_win32/pull/233)
+
+- **Added:** `security::sid_equal` (`EqualSid`), closing issue #162 —
+  byte-correct SID comparison. A naive memory comparison of two `PSID`
+  buffers isn't safe: a SID's trailing sub-authority count varies its
+  total size, so two equal SIDs aren't guaranteed to be the same number
+  of bytes to begin with (and two different-length buffers could still
+  collide on a prefix). Tested against PR #232's `copy_sid` (a SID and
+  its own copy compare equal) and PR #229's `lookup_account_name`'s
+  well-known "Everyone" SID (a real file's owner never equals it).
+
 ## PR #232 — security: add sid_length/is_valid_sid/copy_sid
 **2026-07-23** · [#232](https://github.com/baileyrd/rusty_win32/pull/232)
 

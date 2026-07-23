@@ -97,6 +97,7 @@ unsafe extern "system" {
         dest_sid: *mut core::ffi::c_void,
         source_sid: *mut core::ffi::c_void,
     ) -> i32;
+    fn EqualSid(a: *mut core::ffi::c_void, b: *mut core::ffi::c_void) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -1060,6 +1061,21 @@ pub unsafe fn copy_sid(sid: *mut core::ffi::c_void) -> Result<SidBuf, crate::err
     }
 }
 
+/// Whether `a` and `b` name the same SID — `EqualSid`, the only safe way
+/// to compare two `PSID`s: a naive byte-for-byte memory comparison isn't
+/// safe here, since a SID's trailing sub-authority count varies its
+/// total size.
+///
+/// # Safety
+///
+/// `a` and `b` must both be valid `PSID`s (as [`is_valid_sid`] would
+/// confirm) for the duration of this call.
+pub unsafe fn sid_equal(a: *mut core::ffi::c_void, b: *mut core::ffi::c_void) -> bool {
+    // SAFETY: `a`/`b` are caller-supplied per this function's own safety
+    // contract.
+    unsafe { EqualSid(a, b) != 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1470,6 +1486,47 @@ mod tests {
             original_account, copied_account,
             "the copied SID should resolve to the same account as the original"
         );
+
+        std::fs::remove_file(&path).expect("removing the test file should succeed");
+    }
+
+    #[test]
+    fn sid_equal_reports_true_for_a_sid_and_its_own_copy() {
+        let path = std::env::temp_dir().join("rusty_win32_security_test_sid_equal_same.txt");
+        std::fs::write(&path, b"hello").expect("creating the test file should succeed");
+        let path_str = path.to_str().expect("temp path should be valid UTF-8");
+
+        let info = path_security_info(path_str, OWNER_SECURITY_INFORMATION)
+            .expect("GetNamedSecurityInfoW should succeed for a real file");
+        let owner = info.owner().expect("a real file should have an owner SID");
+
+        // SAFETY: `owner` is a valid `PSID` from `info`, which stays
+        // alive (not yet dropped) for this whole test.
+        let copied = unsafe { copy_sid(owner) }.expect("CopySid should succeed");
+        // SAFETY: `owner` and `copied`'s SID are both still alive for
+        // this whole call.
+        assert!(unsafe { sid_equal(owner, copied.as_ptr().cast_mut()) });
+
+        std::fs::remove_file(&path).expect("removing the test file should succeed");
+    }
+
+    #[test]
+    fn sid_equal_reports_false_for_two_different_well_known_sids() {
+        let (everyone_sid, _) = lookup_account_name("Everyone")
+            .expect("LookupAccountNameW should succeed for the well-known Everyone group");
+        let path = std::env::temp_dir().join("rusty_win32_security_test_sid_equal_diff.txt");
+        std::fs::write(&path, b"hello").expect("creating the test file should succeed");
+        let path_str = path.to_str().expect("temp path should be valid UTF-8");
+
+        let info = path_security_info(path_str, OWNER_SECURITY_INFORMATION)
+            .expect("GetNamedSecurityInfoW should succeed for a real file");
+        let owner = info.owner().expect("a real file should have an owner SID");
+
+        // A real file's owner is never the well-known "Everyone" group.
+        // SAFETY: `owner` is a valid `PSID` from `info`, which stays
+        // alive (not yet dropped) for this whole test; `everyone_sid`'s
+        // SID is likewise still alive.
+        assert!(!unsafe { sid_equal(owner, everyone_sid.as_ptr().cast_mut()) });
 
         std::fs::remove_file(&path).expect("removing the test file should succeed");
     }
