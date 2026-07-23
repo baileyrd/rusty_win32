@@ -16,6 +16,16 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
   can validly produce a second value for the same object). Another
   round-2 "weak/no clear consumer" item (`gap-analysis.md`); no current
   `rush` feature asks for this.
+- **Fixed:** a real CI-caught linker failure (`LNK2019: unresolved
+  external symbol __imp_CompareObjectHandles`) on this crate's own
+  `windows-latest` runner: some Windows SDK versions' `kernel32.lib`
+  import library omits a static stub for this symbol despite it being a
+  real, always-present `kernel32.dll` export. Fixed by resolving it via
+  `GetProcAddress` at call time instead of this crate's usual static
+  `#[link]` import — new territory for this crate, but scoped to this one
+  function. `same_object`'s signature changed to `Result<bool,
+  Win32Error>` to report the (practically unreachable) case where the
+  lookup itself fails.
 
 ## PR #200 — fs: add compressed_file_size (GetCompressedFileSizeW)
 **2026-07-23** · [#200](https://github.com/baileyrd/rusty_win32/pull/200)

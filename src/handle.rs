@@ -86,7 +86,8 @@ unsafe extern "system" {
         milliseconds: u32,
         alertable: i32,
     ) -> u32;
-    fn CompareObjectHandles(first: RawHandle, second: RawHandle) -> i32;
+    fn GetModuleHandleW(module_name: *const u16) -> RawHandle;
+    fn GetProcAddress(module: RawHandle, proc_name: *const u8) -> *mut core::ffi::c_void;
 }
 
 /// `INFINITE` — `WaitForSingleObjectEx`/`WaitForMultipleObjectsEx`'s
@@ -576,21 +577,62 @@ pub unsafe fn signal_and_wait(
     }
 }
 
+type CompareObjectHandlesFn = unsafe extern "system" fn(RawHandle, RawHandle) -> i32;
+
 /// Ask Windows directly whether `first` and `second` refer to the same
 /// kernel object — `CompareObjectHandles`, the documented-correct
 /// alternative to comparing raw handle values, which isn't guaranteed
 /// reliable (a handle value can be reused after its object is closed, and
 /// two distinct handle values can validly refer to the same object, e.g.
-/// via [`duplicate`]). No `Result`: this call has no documented failure
-/// mode beyond the boolean answer itself.
+/// via [`duplicate`]). Resolved via `GetProcAddress` at call time rather
+/// than this crate's usual static `#[link]` import: despite being a real,
+/// always-present `kernel32.dll` export (forwarded from `KernelBase.dll`),
+/// some Windows SDK versions' `kernel32.lib` import library omits a static
+/// stub for it, which fails to *link* (not just run) on those toolchains —
+/// confirmed by a real CI failure on this crate's own `windows-latest`
+/// runner. Kernel32 is never unloaded for the lifetime of a process, so
+/// this lookup can't outlive its module.
 ///
 /// # Safety
 ///
 /// `first` and `second` must each be a currently-open, valid handle.
-pub unsafe fn same_object(first: RawHandle, second: RawHandle) -> bool {
-    // SAFETY: both handles are caller-supplied per this function's own
-    // safety contract.
-    unsafe { CompareObjectHandles(first, second) != 0 }
+pub unsafe fn same_object(first: RawHandle, second: RawHandle) -> Result<bool, Win32Error> {
+    const KERNEL32: &[u16] = &[
+        b'k' as u16,
+        b'e' as u16,
+        b'r' as u16,
+        b'n' as u16,
+        b'e' as u16,
+        b'l' as u16,
+        b'3' as u16,
+        b'2' as u16,
+        b'.' as u16,
+        b'd' as u16,
+        b'l' as u16,
+        b'l' as u16,
+        0,
+    ];
+    const PROC_NAME: &[u8] = b"CompareObjectHandles\0";
+    // SAFETY: `KERNEL32` is a valid, NUL-terminated UTF-16 string naming a
+    // module that's always already loaded in any Win32 process.
+    let module = unsafe { GetModuleHandleW(KERNEL32.as_ptr()) };
+    if module.is_null() {
+        return Err(Win32Error::last());
+    }
+    // SAFETY: `module` is a valid module handle just obtained above;
+    // `PROC_NAME` is a valid, NUL-terminated ASCII string.
+    let proc = unsafe { GetProcAddress(module, PROC_NAME.as_ptr()) };
+    if proc.is_null() {
+        // ERROR_PROC_NOT_FOUND — Windows' own documented code for this,
+        // not a distinct error this crate invents.
+        return Err(Win32Error::from_raw(127));
+    }
+    // SAFETY: `proc` is a non-null pointer `GetProcAddress` reported for
+    // `"CompareObjectHandles"`, which has this exact signature per its
+    // documented prototype; both handles are caller-supplied per this
+    // function's own safety contract.
+    let compare: CompareObjectHandlesFn = unsafe { core::mem::transmute(proc) };
+    Ok(unsafe { compare(first, second) != 0 })
 }
 
 #[cfg(test)]
@@ -955,13 +997,15 @@ mod tests {
         // SAFETY: `original`/`duplicated` are both valid, currently-open
         // handles; this is the operation under test.
         assert!(
-            unsafe { same_object(original, duplicated) },
+            unsafe { same_object(original, duplicated) }
+                .expect("CompareObjectHandles should succeed"),
             "a duplicated handle should refer to the same object as the original"
         );
         // SAFETY: `original`/`unrelated` are both valid, currently-open
         // handles.
         assert!(
-            !unsafe { same_object(original, unrelated) },
+            !unsafe { same_object(original, unrelated) }
+                .expect("CompareObjectHandles should succeed"),
             "two independently created mutexes should not be the same object"
         );
 
