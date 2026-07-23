@@ -6,6 +6,27 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #87 — path: add current_dir/set_current_dir (GetCurrentDirectoryW/SetCurrentDirectoryW)
+**2026-07-23** · [#87](https://github.com/baileyrd/rusty_win32/pull/87)
+
+- **Added:** `path::current_dir`/`path::set_current_dir` — the actual Win32
+  primitives behind `cd`/`pwd`. Closes issue #54, the first item worked from
+  a new parity-loop pass against the real Win32 API surface
+  (`gap-analysis.md`, PR #86) — a systematic function-level sweep (mingw-w64
+  headers as a local proxy for `windows-sys`) rather than the round-2
+  assessment's needs-driven inventory. Surprising finding from that sweep:
+  nothing in this crate wrapped either primitive at all before this.
+
+## PR #86 — Add gap-analysis.md: parity-loop assessment vs. the real Win32 API surface
+**2026-07-23** · [#86](https://github.com/baileyrd/rusty_win32/pull/86)
+
+- **Added:** `gap-analysis.md`, a function-level Win32 API coverage sweep.
+  32 candidate gaps identified (21 with a concrete rush/rusty_lines
+  consumer, 11 plausible-but-not-yet-built coreutils-style builtins), filed
+  as issues #54–#85. ~25 additional candidates found with no clear
+  consumer, listed but not filed. Registry/ACLs/services/networking/ConPTY
+  reconfirmed out of scope.
+
 ## PR #53 — job: narrow process_ids to Vec<u32>, matching every other pid in this crate
 **2026-07-23** · [#53](https://github.com/baileyrd/rusty_win32/pull/53)
 

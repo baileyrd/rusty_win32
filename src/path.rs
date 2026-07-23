@@ -32,6 +32,8 @@ unsafe extern "system" {
     ) -> u32;
     fn GetShortPathNameW(long_path: *const u16, short_path: *mut u16, buffer_length: u32) -> u32;
     fn GetLongPathNameW(short_path: *const u16, long_path: *mut u16, buffer_length: u32) -> u32;
+    fn GetCurrentDirectoryW(buffer_length: u32, buffer: *mut u16) -> u32;
+    fn SetCurrentDirectoryW(path: *const u16) -> i32;
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -190,6 +192,43 @@ pub fn long_path(path: &str) -> Result<String, Win32Error> {
     Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
 }
 
+/// The calling process's current working directory — `GetCurrentDirectoryW`,
+/// the actual Win32 primitive behind `cd`/`pwd`.
+pub fn current_dir() -> Result<String, Win32Error> {
+    let mut buf: Vec<u16> = alloc::vec![0u16; MAX_PATH];
+    // Same two-attempt growth pattern as `search_path`/`short_path`/
+    // `long_path` — `GetCurrentDirectoryW`'s own documented behavior on
+    // "buffer too small" is to report the exact required size (including
+    // the terminating NUL, unlike the other three functions here, which
+    // don't — harmless either way since this loop only ever treats the
+    // reported value as a lower bound to grow to, not an exact match).
+    for _ in 0..2 {
+        // SAFETY: `buf` is a valid, `buf.len()`-element writable buffer.
+        let needed = unsafe { GetCurrentDirectoryW(buf.len() as u32, buf.as_mut_ptr()) };
+        if needed == 0 {
+            return Err(Win32Error::last());
+        }
+        if (needed as usize) > buf.len() {
+            buf.resize(needed as usize, 0);
+            continue;
+        }
+        return Ok(String::from_utf16_lossy(&buf[..needed as usize]));
+    }
+    Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
+}
+
+/// Set the calling process's current working directory — `SetCurrentDirectoryW`.
+pub fn set_current_dir(path: &str) -> Result<(), Win32Error> {
+    let wide = to_wide(path);
+    // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string.
+    let ok = unsafe { SetCurrentDirectoryW(wide.as_ptr()) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,6 +250,31 @@ mod tests {
         )
         .expect("SearchPathW should succeed even when nothing matches");
         assert_eq!(found, None);
+    }
+
+    #[test]
+    fn set_current_dir_then_current_dir_round_trips() {
+        let original = current_dir().expect("GetCurrentDirectoryW should succeed");
+        let system_root = std::env::var("SystemRoot")
+            .expect("SystemRoot should be set in any real Windows process's environment");
+
+        set_current_dir(&system_root).expect("SetCurrentDirectoryW should succeed");
+        let changed = current_dir().expect("GetCurrentDirectoryW should succeed");
+        assert!(
+            changed.eq_ignore_ascii_case(&system_root),
+            "expected {system_root:?}, got {changed:?}"
+        );
+
+        // Restore the original directory so this test doesn't leak
+        // process-global state into others.
+        set_current_dir(&original).expect("restoring the original directory should succeed");
+    }
+
+    #[test]
+    fn set_current_dir_fails_for_a_nonexistent_directory() {
+        let err =
+            set_current_dir(r"C:\this-directory-should-not-exist-rusty-win32-test").unwrap_err();
+        assert_eq!(err, Win32Error::ERROR_FILE_NOT_FOUND);
     }
 
     #[test]
