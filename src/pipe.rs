@@ -88,6 +88,13 @@ unsafe extern "system" {
         collect_data_timeout: *const u32,
     ) -> i32;
     fn WaitNamedPipeW(name: *const u16, timeout_ms: u32) -> i32;
+    fn GetNamedPipeInfo(
+        named_pipe: RawHandle,
+        flags: *mut u32,
+        out_buffer_size: *mut u32,
+        in_buffer_size: *mut u32,
+        max_instances: *mut u32,
+    ) -> i32;
     fn CreateFileW(
         file_name: *const u16,
         desired_access: u32,
@@ -289,6 +296,65 @@ pub fn open_client(name: &str, desired_access: u32) -> Result<RawHandle, Win32Er
     }
 }
 
+/// `GetNamedPipeInfo`'s `lpFlags`: this handle is the server end (a client
+/// handle, the more common case, doesn't carry this bit).
+const PIPE_SERVER_END: u32 = 0x0000_0001;
+
+/// [`pipe_info`]'s result — `GetNamedPipeInfo`'s fields, the read-side
+/// counterpart to [`create_server`]'s creation-time parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipeInfo {
+    /// `true` if this handle is the server end, `false` if it's a client
+    /// end (e.g. one opened via [`open_client`]).
+    pub is_server_end: bool,
+    /// `true` for [`PIPE_TYPE_MESSAGE`] mode, `false` for [`PIPE_TYPE_BYTE`].
+    pub is_message_type: bool,
+    /// The pipe's output buffer size, in bytes (`0` if the system chose a
+    /// default at creation, same caveat `create_server`'s own parameter
+    /// documents).
+    pub out_buffer_size: u32,
+    /// The pipe's input buffer size, in bytes.
+    pub in_buffer_size: u32,
+    /// The maximum number of server instances this pipe name allows —
+    /// [`PIPE_UNLIMITED_INSTANCES`] if uncapped.
+    pub max_instances: u32,
+}
+
+/// Read back `pipe`'s own type/mode/buffer-size configuration —
+/// `GetNamedPipeInfo`. Works on either a server handle (from
+/// [`create_server`]) or a client handle (from [`open_client`]).
+///
+/// # Safety
+///
+/// `pipe` must be a currently-open, valid named-pipe handle.
+pub unsafe fn pipe_info(pipe: RawHandle) -> Result<PipeInfo, Win32Error> {
+    let mut flags: u32 = 0;
+    let mut out_buffer_size: u32 = 0;
+    let mut in_buffer_size: u32 = 0;
+    let mut max_instances: u32 = 0;
+    // SAFETY: `pipe` is caller-supplied per this function's own safety
+    // contract; the four out-pointers are valid, distinct local variables.
+    let ok = unsafe {
+        GetNamedPipeInfo(
+            pipe,
+            &mut flags,
+            &mut out_buffer_size,
+            &mut in_buffer_size,
+            &mut max_instances,
+        )
+    };
+    if ok == 0 {
+        return Err(Win32Error::last());
+    }
+    Ok(PipeInfo {
+        is_server_end: flags & PIPE_SERVER_END != 0,
+        is_message_type: flags & PIPE_TYPE_MESSAGE != 0,
+        out_buffer_size,
+        in_buffer_size,
+        max_instances,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +525,52 @@ mod tests {
         // mode to non-blocking.
         unsafe { set_pipe_mode(client, PIPE_READMODE_BYTE | PIPE_NOWAIT) }
             .expect("SetNamedPipeHandleState should succeed");
+
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(server).unwrap();
+            crate::handle::close(client).unwrap();
+        }
+    }
+
+    #[test]
+    fn pipe_info_reports_server_and_client_ends_correctly() {
+        let name = "rusty_win32_test_pipe_info";
+        let server = create_server(
+            name,
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            1,
+            512,
+            256,
+        )
+        .expect("CreateNamedPipeW should succeed");
+
+        let client_thread = std::thread::spawn(move || {
+            wait_for_server(name, 5_000).expect("WaitNamedPipeW should succeed");
+            open_client(name, GENERIC_READ | GENERIC_WRITE).expect("CreateFileW should succeed")
+                as usize
+        });
+        // SAFETY: `server` is freshly created via `create_server` above, not
+        // yet connected.
+        unsafe { connect_server(server) }.expect("ConnectNamedPipeW should succeed");
+        let client = client_thread
+            .join()
+            .expect("client thread should not panic") as RawHandle;
+
+        // SAFETY: `server` is a valid, currently-open named-pipe handle;
+        // this is the operation under test.
+        let server_info = unsafe { pipe_info(server) }.expect("GetNamedPipeInfo should succeed");
+        assert!(server_info.is_server_end);
+        assert!(server_info.is_message_type);
+        assert_eq!(server_info.out_buffer_size, 512);
+        assert_eq!(server_info.in_buffer_size, 256);
+        assert_eq!(server_info.max_instances, 1);
+
+        // SAFETY: `client` is a valid, currently-open named-pipe handle.
+        let client_info = unsafe { pipe_info(client) }.expect("GetNamedPipeInfo should succeed");
+        assert!(!client_info.is_server_end);
+        assert!(client_info.is_message_type);
 
         // SAFETY: both handles are valid and each closed exactly once.
         unsafe {

@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #202 — pipe: add pipe_info (GetNamedPipeInfo)
+**2026-07-23** · [#202](https://github.com/baileyrd/rusty_win32/pull/202)
+
+- **Added:** `pipe::pipe_info` (`GetNamedPipeInfo`) plus a new `PipeInfo`
+  struct, closing issue #131 — reads back a named pipe's own type/mode/
+  buffer-size configuration, the read-side counterpart to
+  `pipe::create_server`'s creation-time parameters. Works on either a
+  server handle or a client handle. Another round-2 "weak/no clear
+  consumer" item (`gap-analysis.md`); no current `rush` feature asks for
+  this.
+
 ## PR #201 — handle: add same_object (CompareObjectHandles)
 **2026-07-23** · [#201](https://github.com/baileyrd/rusty_win32/pull/201)
 
