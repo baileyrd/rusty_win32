@@ -233,6 +233,7 @@ unsafe extern "system" {
     fn FindFirstFileW(file_name: *const u16, find_file_data: *mut FindDataW) -> RawHandle;
     fn FindNextFileW(find_file: RawHandle, find_file_data: *mut FindDataW) -> i32;
     fn FindClose(find_file: RawHandle) -> i32;
+    fn GetCompressedFileSizeW(file_name: *const u16, file_size_high: *mut u32) -> u32;
     fn CopyFileW(
         existing_file_name: *const u16,
         new_file_name: *const u16,
@@ -412,6 +413,31 @@ pub fn stat(path: &str) -> Result<FileInfo, Win32Error> {
         last_write_time: filetime_to_timespec(data.last_write_time),
         size: (u64::from(data.file_size_high) << 32) | u64::from(data.file_size_low),
     })
+}
+
+/// `GetCompressedFileSizeW`'s sentinel return value on failure — but also
+/// a legitimate value if the file's actual low-order 32 bits happen to be
+/// all-ones, so a `GetLastError()` check (below) is required to
+/// disambiguate, per this call's own documented contract.
+const INVALID_FILE_SIZE: u32 = 0xFFFF_FFFF;
+
+/// The on-disk (compressed) size of the file at `path`, in bytes —
+/// `GetCompressedFileSizeW`. For a file with no NTFS compression (the
+/// common case), this equals [`stat`]'s logical `size`; it's meaningfully
+/// smaller only for a file NTFS is actually compressing on disk.
+pub fn compressed_file_size(path: &str) -> Result<u64, Win32Error> {
+    let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    let mut size_high: u32 = 0;
+    // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; `size_high`
+    // is a valid out-pointer.
+    let size_low = unsafe { GetCompressedFileSizeW(wide.as_ptr(), &mut size_high) };
+    if size_low == INVALID_FILE_SIZE {
+        let err = Win32Error::last();
+        if err.code() != 0 {
+            return Err(err);
+        }
+    }
+    Ok((u64::from(size_high) << 32) | u64::from(size_low))
 }
 
 /// `fstat` an already-open handle — `GetFileInformationByHandle`. Reports
@@ -941,6 +967,24 @@ mod tests {
             info.attributes & FILE_ATTRIBUTE_DIRECTORY,
             0,
             "a plain file must not carry the directory attribute"
+        );
+
+        std::fs::remove_file(&path).expect("cleaning up the test file should succeed");
+    }
+
+    #[test]
+    fn compressed_file_size_matches_stats_logical_size_for_an_uncompressed_file() {
+        let path = std::env::temp_dir().join("rusty_win32_fs_compressed_size_test.txt");
+        std::fs::write(&path, b"rusty_win32").expect("writing the test file should succeed");
+
+        let logical_size = stat(path.to_str().unwrap())
+            .expect("GetFileAttributesExW should succeed")
+            .size;
+        let on_disk_size = compressed_file_size(path.to_str().unwrap())
+            .expect("GetCompressedFileSizeW should succeed");
+        assert_eq!(
+            on_disk_size, logical_size,
+            "an uncompressed file's compressed size should equal its logical size"
         );
 
         std::fs::remove_file(&path).expect("cleaning up the test file should succeed");

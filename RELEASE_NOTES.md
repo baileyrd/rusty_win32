@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #200 — fs: add compressed_file_size (GetCompressedFileSizeW)
+**2026-07-23** · [#200](https://github.com/baileyrd/rusty_win32/pull/200)
+
+- **Added:** `fs::compressed_file_size` (`GetCompressedFileSizeW`), closing
+  issue #129 — the on-disk (compressed) size of a file vs. `fs::stat`'s
+  logical size, meaningful only for an NTFS-compressed file. Disambiguates
+  the call's `INVALID_FILE_SIZE` sentinel from a legitimate all-ones
+  low-order size via `GetLastError()`, per its documented contract.
+  Another round-2 "weak/no clear consumer" item (`gap-analysis.md`); no
+  current `rush` feature asks for this.
+
 ## PR #199 — volume: add volume_path_name (GetVolumePathNameW)
 **2026-07-23** · [#199](https://github.com/baileyrd/rusty_win32/pull/199)
 
