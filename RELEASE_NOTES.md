@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #91 — path: add full_path (GetFullPathNameW)
+**2026-07-23** · [#91](https://github.com/baileyrd/rusty_win32/pull/91)
+
+- **Added:** `path::full_path` (`GetFullPathNameW`), resolving a relative
+  path (or one with `.`/`..` components) to its fully qualified absolute
+  form — closing issue #58 from the parity-loop sweep. Follows
+  `search_path`/`short_path`/`long_path`'s existing two-attempt
+  growth-buffer pattern. Unlike `short_path`/`long_path`, purely lexical —
+  `GetFullPathNameW` never touches the filesystem, so it succeeds even for
+  a path that doesn't exist.
+
 ## PR #90 — handle: add get_std_handle/set_std_handle (GetStdHandle/SetStdHandle)
 **2026-07-23** · [#90](https://github.com/baileyrd/rusty_win32/pull/90)
 
