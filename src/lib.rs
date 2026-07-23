@@ -221,11 +221,21 @@
 //! current `rush`/`rusty_lines` call site needs it yet.
 //!
 //! [`path::short_path`]/[`path::long_path`] (`GetShortPathNameW`/
-//! `GetLongPathNameW`) close the round-2 assessment's last speculative
-//! item: normalizing between a legacy 8.3 short name and its long form — a
-//! rare but real source of path-comparison surprises this crate's
-//! reparse-point-aware [`fs::final_path`] doesn't otherwise cover, again
-//! with no known consumer today.
+//! `GetLongPathNameW`) close one of the round-2 assessment's last
+//! speculative items: normalizing between a legacy 8.3 short name and its
+//! long form — a rare but real source of path-comparison surprises this
+//! crate's reparse-point-aware [`fs::final_path`] doesn't otherwise cover,
+//! again with no known consumer today.
+//!
+//! [`watch`] (`ReadDirectoryChangesW`) closes the round-2 assessment's
+//! final item, and the only one that genuinely required `OVERLAPPED` I/O
+//! — every other primitive in this crate got away with a purely
+//! synchronous call, but `ReadDirectoryChangesW` has no way to bound how
+//! long it blocks otherwise. [`watch::read_changes`] wraps the overlapped
+//! path behind the same `Option<u32>` timeout convention
+//! [`process::wait`] already uses, cancelling the pending read via
+//! `CancelIoEx` on timeout rather than leaving a caller with no way to
+//! ever give up waiting.
 //!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
@@ -300,3 +310,10 @@ pub mod pipe;
 // `rusty_win32::volume::*`.
 #[cfg(windows)]
 pub mod volume;
+
+// `watch`'s several-item surface (two functions, a result struct, and the
+// `FILE_NOTIFY_CHANGE_*`/`FILE_ACTION_*` constants) is deliberately not
+// re-exported at the crate root either, for the same reason as
+// `job`'s/`fs`'s/`pipe`'s/`volume`'s — reach it via `rusty_win32::watch::*`.
+#[cfg(windows)]
+pub mod watch;

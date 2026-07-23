@@ -150,6 +150,7 @@ win32_errors! {
     ERROR_NO_MORE_FILES = 18 => "there are no more files",
     ERROR_PIPE_BUSY = 231 => "all pipe instances are busy",
     ERROR_PIPE_CONNECTED = 535 => "a client is connected to the pipe",
+    ERROR_NOTIFY_ENUM_DIR = 1022 => "the buffer for the directory-change notifications overflowed",
 }
 
 impl core::error::Error for Win32Error {}

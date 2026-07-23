@@ -6,6 +6,24 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #52 — Add watch module: filesystem change notification (ReadDirectoryChangesW)
+**2026-07-23** · [#52](https://github.com/baileyrd/rusty_win32/pull/52)
+
+- **Added:** `watch::open_directory`/`watch::read_changes`, wrapping
+  `ReadDirectoryChangesW` — closes the round-2 assessment's final item, and
+  the only one that genuinely required `OVERLAPPED` I/O. No current `rush`
+  feature (no file-watch builtin) asks for this; added as a standard
+  building block a maturing shell eventually wants.
+- `ReadDirectoryChangesW` has no way to bound how long it blocks other
+  than overlapped completion — `read_changes` wraps that behind the same
+  `Option<u32>` timeout convention `process::wait` already uses, cancelling
+  the pending read via `CancelIoEx` on timeout so a caller never risks an
+  unbounded hang.
+- A buffer overflow (more change records in one burst than the internal
+  64 KiB buffer holds) reports `ERROR_NOTIFY_ENUM_DIR` rather than a
+  silently truncated result — Windows' own signal that changes were
+  missed. `error.rs` gained this named constant.
+
 ## PR #51 — path: add short_path/long_path (GetShortPathNameW/GetLongPathNameW)
 **2026-07-23** · [#51](https://github.com/baileyrd/rusty_win32/pull/51)
 

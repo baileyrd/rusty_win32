@@ -29,6 +29,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `path::short_path`/`path::long_path` (`GetShortPathNameW`/
   `GetLongPathNameW`), normalizing between a legacy 8.3 short name and its
   long form.
+- `watch` module: filesystem change notification (`ReadDirectoryChangesW`),
+  wrapped in `OVERLAPPED` I/O with a `process::wait`-style `Option<u32>`
+  timeout — this crate's first genuinely overlapped primitive, since
+  `ReadDirectoryChangesW` has no other way to bound how long it blocks.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
