@@ -23,6 +23,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 const CREATE_SUSPENDED: u32 = 0x0000_0004;
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
 const INFINITE: u32 = 0xFFFF_FFFF;
 const WAIT_OBJECT_0: u32 = 0;
@@ -195,6 +196,16 @@ pub struct SpawnedProcess {
 /// std-handle override here; redirect by swapping the parent's std-handle
 /// slots before spawning, matching `winstdio`'s existing model in rush.
 ///
+/// `new_process_group` requests `CREATE_NEW_PROCESS_GROUP`, putting the
+/// child (and any descendants it spawns) in a console process group of its
+/// own rather than the caller's. This is what makes it possible to later
+/// interrupt *just* that child via
+/// [`crate::console::generate_ctrl_event`]`(CTRL_BREAK_EVENT, group_id)` —
+/// without it, a console control event has no way to target one child
+/// process group instead of every process attached to the console at once.
+/// `group_id` for that later call is this same [`SpawnedProcess::process_id`]
+/// — Windows defines a new process group's id as its creating process's pid.
+///
 /// `environment` overrides the child's environment block; `None` inherits
 /// the calling process's own environment unchanged (`CreateProcessW`'s
 /// default when its `lpEnvironment` argument is null). A caller tracking
@@ -217,6 +228,7 @@ pub struct SpawnedProcess {
 pub unsafe fn spawn_suspended(
     command_line: &str,
     inherit_handles: bool,
+    new_process_group: bool,
     environment: Option<&[u16]>,
 ) -> Result<SpawnedProcess, Win32Error> {
     // `CreateProcessW` is documented as possibly writing into this buffer
@@ -238,11 +250,13 @@ pub unsafe fn spawn_suspended(
     // `CREATE_UNICODE_ENVIRONMENT` is required whenever an explicit
     // environment block is passed — without it, `CreateProcessW` expects
     // an ANSI (8-bit) block instead and misreads ours.
-    let creation_flags = if environment.is_some() {
-        CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT
-    } else {
-        CREATE_SUSPENDED
-    };
+    let mut creation_flags = CREATE_SUSPENDED;
+    if environment.is_some() {
+        creation_flags |= CREATE_UNICODE_ENVIRONMENT;
+    }
+    if new_process_group {
+        creation_flags |= CREATE_NEW_PROCESS_GROUP;
+    }
     let env_ptr = environment.map_or(core::ptr::null(), |e| {
         e.as_ptr().cast::<core::ffi::c_void>()
     });
@@ -618,7 +632,7 @@ mod tests {
         // command, confirm the exit code round-trips.
         // SAFETY: a hand-built, correctly quoted command line for a
         // well-known system binary.
-        let spawned = unsafe { spawn_suspended("cmd.exe /c exit 7", false, None) }
+        let spawned = unsafe { spawn_suspended("cmd.exe /c exit 7", false, false, None) }
             .expect("CreateProcessW should succeed");
         assert_ne!(spawned.process_id, 0);
         assert_ne!(spawned.thread_id, 0);
@@ -651,9 +665,9 @@ mod tests {
         // race between two real running processes.
         // SAFETY: hand-built, correctly quoted command lines for a
         // well-known system binary.
-        let a = unsafe { spawn_suspended("cmd.exe /c exit 3", false, None) }
+        let a = unsafe { spawn_suspended("cmd.exe /c exit 3", false, false, None) }
             .expect("CreateProcessW should succeed");
-        let b = unsafe { spawn_suspended("cmd.exe /c exit 9", false, None) }
+        let b = unsafe { spawn_suspended("cmd.exe /c exit 9", false, false, None) }
             .expect("CreateProcessW should succeed");
 
         // SAFETY: `b.thread` is freshly created, valid, not yet resumed.
@@ -687,7 +701,7 @@ mod tests {
     fn wait_any_times_out_when_nothing_has_exited() {
         // SAFETY: a hand-built, correctly quoted command line for a
         // well-known system binary.
-        let spawned = unsafe { spawn_suspended("cmd.exe /c exit 0", false, None) }
+        let spawned = unsafe { spawn_suspended("cmd.exe /c exit 0", false, false, None) }
             .expect("CreateProcessW should succeed");
 
         // Still suspended, so a zero-timeout wait_any must time out.
@@ -731,7 +745,7 @@ mod tests {
         // SAFETY: a hand-built, correctly quoted command line for a
         // well-known long-running system command.
         let spawned =
-            unsafe { spawn_suspended("cmd.exe /c ping -n 30 127.0.0.1 >nul", false, None) }
+            unsafe { spawn_suspended("cmd.exe /c ping -n 30 127.0.0.1 >nul", false, false, None) }
                 .expect("CreateProcessW should succeed");
         // SAFETY: `spawned.thread` is freshly created, valid, not yet
         // resumed.
@@ -772,6 +786,57 @@ mod tests {
         assert!(open_by_pid(0, PROCESS_TERMINATE).is_err());
     }
 
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn AllocConsole() -> i32;
+    }
+
+    #[test]
+    fn new_process_group_receives_a_targeted_ctrl_break() {
+        // The scenario `new_process_group` exists for: start a child in its
+        // own console process group, then interrupt *just* that group via
+        // `console::generate_ctrl_event(CTRL_BREAK_EVENT, group_id)` —
+        // Windows defines a new process group's id as its creating
+        // process's own pid, so `spawned.process_id` doubles as the group
+        // id here. `CTRL_C_EVENT` can't be scoped this way at all (Windows
+        // only ever broadcasts it console-wide), which is exactly why this
+        // primitive sends `CTRL_BREAK_EVENT` instead.
+        //
+        // SAFETY: `AllocConsole` has no precondition; a console already
+        // being attached (the ordinary case for a `cargo test` process) is
+        // itself a documented, harmless failure mode here — either way this
+        // process ends up with a real console attached, which is all
+        // `GenerateConsoleCtrlEvent` requires.
+        unsafe { AllocConsole() };
+
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known long-running system command.
+        let spawned =
+            unsafe { spawn_suspended("cmd.exe /c ping -n 30 127.0.0.1 >nul", false, true, None) }
+                .expect("CreateProcessW should succeed");
+        // SAFETY: `spawned.thread` is freshly created, valid, not yet
+        // resumed.
+        unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
+
+        crate::console::generate_ctrl_event(crate::console::CTRL_BREAK_EVENT, spawned.process_id)
+            .expect(
+                "GenerateConsoleCtrlEvent should succeed for a process group this process just created",
+            );
+
+        // SAFETY: `spawned.process` is a valid, currently-open handle.
+        let exit_code = unsafe { wait(spawned.process, Some(10_000)) }.unwrap();
+        assert!(
+            exit_code.is_some(),
+            "the child should have exited in response to CTRL_BREAK_EVENT within the timeout"
+        );
+
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+        }
+    }
+
     #[test]
     fn spawn_suspended_with_environment_overrides_the_childs_view() {
         // A minimal environment block containing exactly one variable: if
@@ -787,6 +852,7 @@ mod tests {
         let spawned = unsafe {
             spawn_suspended(
                 "cmd.exe /c if defined RUSTY_WIN32_TEST_VAR (exit 42) else (exit 1)",
+                false,
                 false,
                 Some(&block),
             )

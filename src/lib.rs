@@ -172,6 +172,16 @@
 //! a point-in-time system-wide process snapshot, not previously possible
 //! with anything in this crate.
 //!
+//! [`process::spawn_suspended`]'s `new_process_group` parameter and
+//! [`console::generate_ctrl_event`] close the round-2 capability
+//! assessment's top-ranked gap: nothing here previously let a caller
+//! interrupt *one* child without affecting every process attached to the
+//! console at once. `CTRL_C_EVENT` can only ever be broadcast console-wide
+//! by Windows' own design — `CREATE_NEW_PROCESS_GROUP` plus
+//! `CTRL_BREAK_EVENT` is the actual mechanism a console app uses to target
+//! one child (and its descendants), so that's what's exposed here rather
+//! than a `CTRL_C_EVENT`-shaped API that couldn't do what its name implies.
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or
@@ -188,7 +198,7 @@ pub use error::Win32Error;
 #[cfg(windows)]
 pub mod console;
 #[cfg(windows)]
-pub use console::{HandlerRoutine, install_ctrl_handler, remove_ctrl_handler};
+pub use console::{HandlerRoutine, generate_ctrl_event, install_ctrl_handler, remove_ctrl_handler};
 
 #[cfg(windows)]
 pub mod handle;
