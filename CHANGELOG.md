@@ -77,6 +77,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   counterpart to `set_inheritable` — another parity-loop find.
 - `volume::disk_free_space` (`GetDiskFreeSpaceExW`), free/total space for a
   `df`-style builtin — another parity-loop find.
+- `process::sleep_ms` (`Sleep`), the direct primitive behind a
+  `sleep`/`usleep` builtin — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
