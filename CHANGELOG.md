@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `registry::enum_keys` (`RegEnumKeyExW`, sized via `RegQueryInfoKeyW`)
+  plus the `RegKeyIter` iterator type — enumerate a key's immediate
+  subkey names as `(String, Timespec)` pairs, the last-write time decoded
+  the same "raw `FILETIME` mirror stays private" way
+  `process::times`/`fs::stat` etc. already do.
 - `registry::enum_values` (`RegEnumValueW`, sized via `RegQueryInfoKeyW`)
   plus the `RegValueIter` iterator type and `Win32Error::ERROR_NO_MORE_ITEMS`
   — enumerate every value under a key as `(String, RegistryValue)` pairs.

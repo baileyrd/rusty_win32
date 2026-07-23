@@ -6,6 +6,24 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #221 — registry: add enum_keys
+**2026-07-23** · [#221](https://github.com/baileyrd/rusty_win32/pull/221)
+
+- **Added:** `registry::enum_keys` (`RegEnumKeyExW`) plus a new
+  `RegKeyIter` iterator type, closing issue #150 — enumerate a key's
+  immediate subkeys as `(String, Timespec)` pairs (name plus last-write
+  time), until `ERROR_NO_MORE_ITEMS`. Sizes its name buffer once up front
+  via `RegQueryInfoKeyW`'s reported maximum subkey-name length, with the
+  same defensive `ERROR_MORE_DATA` grow-and-retry fallback `enum_values`
+  uses. The raw `FILETIME` `RegEnumKeyExW` reports is decoded into
+  `Timespec` rather than exposed as its own public type — matching this
+  crate's "raw FFI struct mirror stays module-private, only the decoded
+  value is public" convention (`process::times`, `fs::stat`, …) — the
+  filed issue's literal wording named a public `FileTime` return type,
+  but this crate already has a real, meaningful timestamp type for
+  exactly this purpose and a second, redundant public type wasn't
+  warranted.
+
 ## PR #220 — registry: add enum_values
 **2026-07-23** · [#220](https://github.com/baileyrd/rusty_win32/pull/220)
 

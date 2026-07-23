@@ -19,6 +19,7 @@
 //! before this module existed.
 
 extern crate alloc;
+use crate::time::Timespec;
 use alloc::vec::Vec;
 
 /// A registry key handle — `HKEY`. Closed via [`close_key`], never
@@ -89,6 +90,48 @@ unsafe extern "system" {
         data: *mut u8,
         data_size: *mut u32,
     ) -> i32;
+    fn RegEnumKeyExW(
+        key: HKey,
+        index: u32,
+        name: *mut u16,
+        name_len: *mut u32,
+        reserved: *mut u32,
+        class: *mut u16,
+        class_len: *mut u32,
+        last_write_time: *mut FileTime,
+    ) -> i32;
+}
+
+// FILETIME: `size_of` 8, `align_of` 4 on x86_64 — mirrors `time.rs`'s
+// private struct of the same shape; duplicated locally rather than
+// shared, matching this crate's existing per-module-locality convention
+// for tiny FFI-mirror structs (`fs.rs`/`process.rs`/`job.rs`/`console.rs`
+// each have their own copy too).
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct FileTime {
+    low: u32,
+    high: u32,
+}
+const _: () = assert!(core::mem::size_of::<FileTime>() == 8);
+const _: () = assert!(core::mem::align_of::<FileTime>() == 4);
+
+/// 100ns ticks between the FILETIME epoch (1601-01-01) and the Unix epoch
+/// (1970-01-01) — the same standard conversion constant `time.rs`/
+/// `fs.rs`/`process.rs` use.
+const FILETIME_UNIX_EPOCH_DIFF_100NS: i64 = 116_444_736_000_000_000;
+const HUNDRED_NS_PER_SEC: i64 = 10_000_000;
+const NANOS_PER_HUNDRED_NS: i64 = 100;
+
+fn filetime_to_timespec(ft: FileTime) -> Timespec {
+    let ticks_100ns =
+        (i64::from(ft.high) << 32 | i64::from(ft.low)) - FILETIME_UNIX_EPOCH_DIFF_100NS;
+    let secs = ticks_100ns.div_euclid(HUNDRED_NS_PER_SEC);
+    let remainder_100ns = ticks_100ns.rem_euclid(HUNDRED_NS_PER_SEC);
+    Timespec {
+        secs,
+        nanos: (remainder_100ns * NANOS_PER_HUNDRED_NS) as u32,
+    }
 }
 
 /// `RegDeleteKeyExW`'s `samDesired` — on WOW64, a 32-bit process's
@@ -717,6 +760,124 @@ pub unsafe fn enum_values(key: HKey) -> RegValueIter {
     }
 }
 
+/// An in-progress [`enum_keys`] enumeration — the subkey-side analog of
+/// [`RegValueIter`], but each item carries only a name plus a last-write
+/// [`Timespec`] (no data/type to decode), so it only needs one growable
+/// buffer.
+pub struct RegKeyIter {
+    key: HKey,
+    index: u32,
+    name_buf: Vec<u16>,
+    done: bool,
+}
+
+impl Iterator for RegKeyIter {
+    type Item = Result<(alloc::string::String, Timespec), crate::error::Win32Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        loop {
+            let mut name_len = self.name_buf.len() as u32;
+            let mut last_write = FileTime::default();
+            // SAFETY: `self.key` is caller-supplied per `enum_keys`'s own
+            // safety contract, and must still be open (this struct's own
+            // invariant, documented there); `name_buf` is a valid,
+            // writable buffer matched by `name_len` naming its exact
+            // length (already accounting for `RegEnumKeyExW`'s documented
+            // "including the terminating null character" input
+            // convention); `class`/`class_len` are both null together, a
+            // documented-valid way to say "this crate doesn't want the
+            // class name."
+            let status = unsafe {
+                RegEnumKeyExW(
+                    self.key,
+                    self.index,
+                    self.name_buf.as_mut_ptr(),
+                    &mut name_len,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                    &mut last_write,
+                )
+            };
+            if status == 0 {
+                self.index += 1;
+                let name =
+                    alloc::string::String::from_utf16_lossy(&self.name_buf[..name_len as usize]);
+                return Some(Ok((name, filetime_to_timespec(last_write))));
+            }
+            let err = crate::error::Win32Error::from_raw(status as u32);
+            if err == crate::error::Win32Error::ERROR_NO_MORE_ITEMS {
+                self.done = true;
+                return None;
+            }
+            if err == crate::error::Win32Error::ERROR_MORE_DATA {
+                // Same defensive reasoning as `RegValueIter::next`: a
+                // subkey created after `enum_keys`'s own initial sizing
+                // query can still exceed what was allocated.
+                self.name_buf.resize(self.name_buf.len().max(1) * 2, 0);
+                continue;
+            }
+            self.done = true;
+            return Some(Err(err));
+        }
+    }
+}
+
+/// Start enumerating every immediate subkey of `key` — repeated
+/// `RegEnumKeyExW` calls, one per [`RegKeyIter::next`], stopping at
+/// `ERROR_NO_MORE_ITEMS`. Each item's `Timespec` is the subkey's
+/// last-write time, decoded from the raw `FILETIME` `RegEnumKeyExW`
+/// itself reports — this crate surfaces it as [`Timespec`] rather than a
+/// raw `FILETIME` mirror, the same "decode into a meaningful type, keep
+/// the FFI struct private" convention `process::times`/`fs::stat` etc.
+/// already follow. Only immediate children, not the whole subtree —
+/// recurse by calling this again on each returned name if a deeper walk
+/// is needed.
+///
+/// # Safety
+///
+/// `key` must be a currently-valid `HKey` — one of the predefined roots
+/// in this module, or a key [`open_key`]/[`create_key`] previously
+/// returned — for the entire lifetime of the returned [`RegKeyIter`], not
+/// merely for this call, the same contract [`enum_values`] documents for
+/// its own iterator.
+pub unsafe fn enum_keys(key: HKey) -> RegKeyIter {
+    let mut max_sub_key_len: u32 = 0;
+    // SAFETY: `key` is caller-supplied per this function's own safety
+    // contract; every other out-pointer is null since this crate only
+    // wants the one sizing hint.
+    let status = unsafe {
+        RegQueryInfoKeyW(
+            key,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            &mut max_sub_key_len,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        )
+    };
+    let name_cap = if status == 0 {
+        max_sub_key_len as usize + 1
+    } else {
+        256
+    };
+    RegKeyIter {
+        key,
+        index: 0,
+        name_buf: alloc::vec![0u16; name_cap.max(1)],
+        done: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1119,6 +1280,93 @@ mod tests {
         let found: alloc::vec::Vec<_> = unsafe { enum_values(key) }
             .collect::<Result<alloc::vec::Vec<_>, _>>()
             .expect("RegEnumValueW should succeed (by finding nothing) for a key with no values");
+        assert!(found.is_empty());
+
+        // SAFETY: `key` is still the same valid, currently-open handle.
+        unsafe { close_key(key) }.expect("RegCloseKey should succeed");
+        // SAFETY: `HKEY_CURRENT_USER` is the same predefined root.
+        unsafe { delete_key(HKEY_CURRENT_USER, subkey.as_str(), 0) }
+            .expect("RegDeleteKeyExW should succeed");
+    }
+
+    #[test]
+    fn enum_keys_reports_every_immediate_subkey() {
+        let parent_subkey = format!(
+            "Software\\rusty_win32_registry_test_enum_keys_{}",
+            std::process::id()
+        );
+        // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid root.
+        let (parent, _disposition) =
+            unsafe { create_key(HKEY_CURRENT_USER, parent_subkey.as_str(), KEY_ALL_ACCESS) }
+                .expect("RegCreateKeyExW should succeed");
+
+        let child_names = ["child_one", "child_two"];
+        for name in &child_names {
+            // SAFETY: `parent` was just created above, opened with
+            // `KEY_ALL_ACCESS`, and stays open for this whole loop.
+            let (child, _disposition) = unsafe { create_key(parent, name, KEY_ALL_ACCESS) }
+                .unwrap_or_else(|e| panic!("RegCreateKeyExW should succeed for {name}: {e}"));
+            // SAFETY: `child` was just created above and not yet closed.
+            unsafe { close_key(child) }.expect("RegCloseKey should succeed");
+        }
+
+        // SAFETY: `parent` is still the same valid, currently-open
+        // handle, kept open for as long as the iterator below is used.
+        let found: alloc::vec::Vec<(alloc::string::String, Timespec)> =
+            unsafe { enum_keys(parent) }
+                .collect::<Result<_, _>>()
+                .expect("RegEnumKeyExW should succeed for every subkey");
+
+        let mut found_names: alloc::vec::Vec<alloc::string::String> =
+            found.iter().map(|(name, _)| name.clone()).collect();
+        found_names.sort();
+        let mut expected_names: alloc::vec::Vec<alloc::string::String> =
+            child_names.iter().map(|s| (*s).into()).collect();
+        expected_names.sort();
+        assert_eq!(found_names, expected_names);
+
+        for (_, last_write) in &found {
+            assert!(
+                last_write.secs > 0,
+                "a subkey created moments ago should report a plausible post-1970 last-write time, got {last_write:?}"
+            );
+        }
+
+        for name in &child_names {
+            // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid
+            // root; `parent` is still the same valid, currently-open
+            // handle. Each child is itself a bare leaf (no subkeys of its
+            // own).
+            unsafe { delete_key(parent, name, 0) }
+                .unwrap_or_else(|e| panic!("RegDeleteKeyExW should succeed for {name}: {e}"));
+        }
+        // SAFETY: `parent` is still the same valid, currently-open
+        // handle.
+        unsafe { close_key(parent) }.expect("RegCloseKey should succeed");
+        // SAFETY: `HKEY_CURRENT_USER` is the same predefined root; the
+        // parent subkey is now empty of children (the loop above deleted
+        // each one).
+        unsafe { delete_key(HKEY_CURRENT_USER, parent_subkey.as_str(), 0) }
+            .expect("RegDeleteKeyExW should succeed");
+    }
+
+    #[test]
+    fn enum_keys_reports_nothing_for_a_key_with_no_subkeys() {
+        let subkey = format!(
+            "Software\\rusty_win32_registry_test_enum_keys_empty_{}",
+            std::process::id()
+        );
+        // SAFETY: `HKEY_CURRENT_USER` is a predefined, always-valid root.
+        let (key, _disposition) =
+            unsafe { create_key(HKEY_CURRENT_USER, subkey.as_str(), KEY_ALL_ACCESS) }
+                .expect("RegCreateKeyExW should succeed");
+
+        // SAFETY: `key` was just created above, opened with
+        // `KEY_ALL_ACCESS`, and stays open for as long as the iterator is
+        // used.
+        let found: alloc::vec::Vec<_> = unsafe { enum_keys(key) }
+            .collect::<Result<alloc::vec::Vec<_>, _>>()
+            .expect("RegEnumKeyExW should succeed (by finding nothing) for a key with no subkeys");
         assert!(found.is_empty());
 
         // SAFETY: `key` is still the same valid, currently-open handle.
