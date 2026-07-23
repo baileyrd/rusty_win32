@@ -17,6 +17,12 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
   two transitions as atomic with each other. Fixed by opening the thread
   handle with `SYNCHRONIZE` too and explicitly waiting on it (via
   `handle::wait_single_ex`, PR #195) before reading the exit code.
+- **Fixed:** a second CI-caught race, in the same run, in
+  `job::tests::accounting_reports_process_counts_after_a_process_exits`
+  (added in PR #38): the same shape of issue — the process handle becoming
+  signaled doesn't guarantee the job object's own `active_processes`
+  bookkeeping has already been decremented. Fixed with a short bounded
+  poll (up to 1s) instead of asserting on the very first read.
 - **Added:** `volume::find_volumes` (`FindFirstVolumeW`/`FindNextVolumeW`/
   `FindVolumeClose`), closing issue #127 — enumerates every volume by its
   stable GUID path (`\\?\Volume{GUID}\`), independent of drive-letter
