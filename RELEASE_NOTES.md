@@ -9,6 +9,16 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 ## PR #209 — console: add process_list (GetConsoleProcessList)
 **2026-07-23** · [#209](https://github.com/baileyrd/rusty_win32/pull/209)
 
+- **Fixed:** a CI-caught race in
+  `process::tests::thread_times_reports_plausible_creation_and_exit_timestamps`
+  (added in PR #193) — the same shape as the earlier `thread_exit_code`
+  fix (PR #198): the process handle becoming signaled doesn't guarantee
+  `GetThreadTimes`' `exit` field is already populated for the thread
+  itself. Fixed by opening the thread handle with `SYNCHRONIZE` too and
+  explicitly waiting on it before reading the times. Unrelated to this
+  PR's own diff; also unrelated to a separate CI infra hang on the same
+  PR (an `apt-get install mingw-w64` step stalled for ~19 min — resolved
+  by cancelling and rerunning, no code change needed for that one).
 - **Added:** `console::process_list` (`GetConsoleProcessList`), closing
   issue #138 — the pids of every process currently attached to the
   calling process's console, e.g. for an "is anything else still
