@@ -6,6 +6,15 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #193 — process: add thread_times (GetThreadTimes)
+**2026-07-23** · [#193](https://github.com/baileyrd/rusty_win32/pull/193)
+
+- **Added:** `process::thread_times` (`GetThreadTimes`), closing issue #122
+  — the thread-level counterpart to `process::times` (`GetProcessTimes`),
+  reusing the same `FileTime`-to-`Timespec` conversions. Another round-2
+  "weak/no clear consumer" item (`gap-analysis.md`); no current `rush`
+  feature asks for this.
+
 ## PR #192 — process: add thread_exit_code (GetExitCodeThread)
 **2026-07-23** · [#192](https://github.com/baileyrd/rusty_win32/pull/192)
 
