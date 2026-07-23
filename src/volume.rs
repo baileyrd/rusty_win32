@@ -63,6 +63,12 @@ unsafe extern "system" {
         file_system_name_buffer: *mut u16,
         file_system_name_size: u32,
     ) -> i32;
+    fn GetDiskFreeSpaceExW(
+        directory_name: *const u16,
+        free_bytes_available_to_caller: *mut u64,
+        total_number_of_bytes: *mut u64,
+        total_number_of_free_bytes: *mut u64,
+    ) -> i32;
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -175,6 +181,48 @@ pub fn volume_information(root_path: &str) -> Result<VolumeInformation, Win32Err
     })
 }
 
+/// Free/total space for the volume `root_path` (e.g. `"C:\\"`) resolves
+/// onto — `GetDiskFreeSpaceExW`, the primitive a `df`-style builtin needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskFreeSpace {
+    /// Bytes available to the calling process's own user — can be less
+    /// than [`total_free_bytes`](Self::total_free_bytes) under per-user
+    /// disk quotas.
+    pub free_bytes_available_to_caller: u64,
+    /// The volume's total capacity in bytes.
+    pub total_bytes: u64,
+    /// Total free bytes on the volume, ignoring any per-user quota.
+    pub total_free_bytes: u64,
+}
+
+/// Free/total space for the volume `root_path` names — `GetDiskFreeSpaceExW`.
+/// `root_path` can be a drive root (`"C:\\"`), a UNC share, or any directory
+/// on the volume (the API resolves it to the containing volume itself).
+pub fn disk_free_space(root_path: &str) -> Result<DiskFreeSpace, Win32Error> {
+    let wide = to_wide(root_path);
+    let mut free_bytes_available_to_caller: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut total_free_bytes: u64 = 0;
+    // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; the three
+    // out-pointers are valid, correctly-sized locals.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free_bytes_available_to_caller,
+            &mut total_bytes,
+            &mut total_free_bytes,
+        )
+    };
+    if ok == 0 {
+        return Err(Win32Error::last());
+    }
+    Ok(DiskFreeSpace {
+        free_bytes_available_to_caller,
+        total_bytes,
+        total_free_bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +284,27 @@ mod tests {
         assert!(
             info.maximum_component_length > 0,
             "a real file system should report a positive max component length"
+        );
+    }
+
+    #[test]
+    fn disk_free_space_reports_plausible_values_for_the_system_drive() {
+        let system_drive = std::env::var("SystemDrive")
+            .expect("SystemDrive should be set in any real Windows process's environment");
+        let root = alloc::format!("{system_drive}\\");
+        let space =
+            disk_free_space(&root).expect("GetDiskFreeSpaceExW should succeed for SystemDrive");
+        assert!(
+            space.total_bytes > 0,
+            "a real, existing volume should report a nonzero total size"
+        );
+        assert!(
+            space.total_free_bytes <= space.total_bytes,
+            "free space can't exceed total capacity"
+        );
+        assert!(
+            space.free_bytes_available_to_caller <= space.total_free_bytes,
+            "caller-available free space can't exceed the volume's total free space"
         );
     }
 }

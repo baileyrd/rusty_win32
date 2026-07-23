@@ -75,6 +75,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   fresh server — another parity-loop find.
 - `handle::handle_information` (`GetHandleInformation`), the read-side
   counterpart to `set_inheritable` — another parity-loop find.
+- `volume::disk_free_space` (`GetDiskFreeSpaceExW`), free/total space for a
+  `df`-style builtin — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
