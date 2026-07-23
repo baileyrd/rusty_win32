@@ -149,6 +149,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   independent of drive-letter assignment — another round-2 item.
 - `volume::volume_path_name` (`GetVolumePathNameW`), mapping an arbitrary
   path to the root path of the volume it's on — another round-2 item.
+- `fs::compressed_file_size` (`GetCompressedFileSizeW`), the on-disk
+  (NTFS-compressed) size of a file vs. `fs::stat`'s logical size —
+  another round-2 item.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
