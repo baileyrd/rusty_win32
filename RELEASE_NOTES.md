@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #88 — fs: add read_dir (FindFirstFileW/FindNextFileW/FindClose)
+**2026-07-23** · [#88](https://github.com/baileyrd/rusty_win32/pull/88)
+
+- **Added:** `fs::read_dir`, returning a `ReadDir` iterator of `DirEntry`
+  (name, attributes, size, and the three `FILETIME` timestamps) — the Win32
+  primitive behind directory listing, closing issue #55 from the parity-loop
+  sweep. Follows the same "opening call already returned the first item"
+  shape as `process::list_processes`'s `Process32FirstW` loop; the search
+  handle closes via `FindClose` on `Drop`. Matches Unix `readdir` in
+  reporting `.`/`..` as real entries rather than filtering them.
+
 ## PR #87 — path: add current_dir/set_current_dir (GetCurrentDirectoryW/SetCurrentDirectoryW)
 **2026-07-23** · [#87](https://github.com/baileyrd/rusty_win32/pull/87)
 

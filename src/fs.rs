@@ -9,10 +9,18 @@
 //! exposes the raw attributes, the same way [`crate::console`]'s
 //! `ENABLE_*` bits are exposed without a raw-mode recipe baked in.
 //!
-//! This module's several-item surface (two functions, two result structs,
-//! and the `FILE_ATTRIBUTE_*` constants) is deliberately not re-exported at
-//! the crate root, the same reasoning [`crate::job`] documents for its own
-//! multi-item surface: reach it via `rusty_win32::fs::*`.
+//! [`read_dir`] (`FindFirstFileW`/`FindNextFileW`) rounds this module out
+//! with directory listing — from a parity-loop pass against the real
+//! Win32 API surface (`gap-analysis.md`), the single biggest concrete gap
+//! found: this module could stat individual paths but had no way to
+//! enumerate a directory's contents at all, which any future `ls`/tab-
+//! completion/glob implementation that walks a directory needs.
+//!
+//! This module's several-item surface (half a dozen functions, several
+//! result structs, and the `FILE_ATTRIBUTE_*` constants) is deliberately
+//! not re-exported at the crate root, the same reasoning [`crate::job`]
+//! documents for its own multi-item surface: reach it via
+//! `rusty_win32::fs::*`.
 
 use crate::error::Win32Error;
 use crate::handle::RawHandle;
@@ -84,7 +92,7 @@ const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
 // FFI-mirror structs (e.g. `WAIT_TIMEOUT` is redefined in `process.rs`,
 // `console.rs`, and `job.rs` rather than centralized).
 #[repr(C)]
-#[derive(Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
 struct FileTime {
     low: u32,
     high: u32,
@@ -217,6 +225,66 @@ unsafe extern "system" {
         bytes_returned: *mut u32,
         overlapped: *mut core::ffi::c_void,
     ) -> i32;
+    fn FindFirstFileW(file_name: *const u16, find_file_data: *mut FindDataW) -> RawHandle;
+    fn FindNextFileW(find_file: RawHandle, find_file_data: *mut FindDataW) -> i32;
+    fn FindClose(find_file: RawHandle) -> i32;
+}
+
+// WIN32_FIND_DATAW: `size_of` 592, `align_of` 4 on x86_64. Verified against
+// mingw-w64's `minwinbase.h` the same way as every other struct in this
+// crate (a `_Static_assert` probe compiled with `x86_64-w64-mingw32-gcc`
+// against the real header). The Mac-only trailing fields (`#ifdef _MAC`)
+// don't exist on this target and aren't modeled here.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct FindDataW {
+    file_attributes: u32,
+    creation_time: FileTime,
+    last_access_time: FileTime,
+    last_write_time: FileTime,
+    file_size_high: u32,
+    file_size_low: u32,
+    reserved0: u32,
+    reserved1: u32,
+    file_name: [u16; 260],
+    alternate_file_name: [u16; 14],
+}
+
+// `[u16; 260]`/`[u16; 14]` don't implement `Default` (std only special-cases
+// arrays up to length 32) — written by hand, the same reason
+// `process::ProcessEntry32W` has a hand-written `Default` impl.
+impl Default for FindDataW {
+    fn default() -> Self {
+        FindDataW {
+            file_attributes: 0,
+            creation_time: FileTime::default(),
+            last_access_time: FileTime::default(),
+            last_write_time: FileTime::default(),
+            file_size_high: 0,
+            file_size_low: 0,
+            reserved0: 0,
+            reserved1: 0,
+            file_name: [0u16; 260],
+            alternate_file_name: [0u16; 14],
+        }
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<FindDataW>() == 592);
+const _: () = assert!(core::mem::align_of::<FindDataW>() == 4);
+const _: () = assert!(core::mem::offset_of!(FindDataW, creation_time) == 4);
+const _: () = assert!(core::mem::offset_of!(FindDataW, file_size_high) == 28);
+const _: () = assert!(core::mem::offset_of!(FindDataW, reserved0) == 36);
+const _: () = assert!(core::mem::offset_of!(FindDataW, file_name) == 44);
+const _: () = assert!(core::mem::offset_of!(FindDataW, alternate_file_name) == 44 + 260 * 2);
+
+/// `INVALID_HANDLE_VALUE` — the sentinel `FindFirstFileW` returns instead of
+/// `NULL` on failure (unlike most handle-returning calls in this crate).
+const INVALID_HANDLE_VALUE: isize = -1;
+
+fn decode_find_file_name(units: &[u16; 260]) -> alloc::string::String {
+    let len = units.iter().position(|&u| u == 0).unwrap_or(units.len());
+    alloc::string::String::from_utf16_lossy(&units[..len])
 }
 
 /// `stat`-by-path result — attributes, timestamps, and size, via
@@ -478,6 +546,104 @@ pub fn readlink(path: &str) -> Result<alloc::string::String, Win32Error> {
         .collect())
 }
 
+/// One directory entry from [`read_dir`] — `WIN32_FIND_DATAW`'s fields.
+/// `file_name` is the bare entry name (`"foo.txt"`, `"."`, `".."`), not a
+/// full path, matching Unix `readdir`'s own `d_name` convention: joining it
+/// back onto the directory being listed is the caller's job.
+#[derive(Debug, Clone)]
+pub struct DirEntry {
+    pub file_name: alloc::string::String,
+    pub file_attributes: u32,
+    pub file_size: u64,
+    pub creation_time: Timespec,
+    pub last_access_time: Timespec,
+    pub last_write_time: Timespec,
+}
+
+fn dir_entry_from_find_data(data: &FindDataW) -> DirEntry {
+    DirEntry {
+        file_name: decode_find_file_name(&data.file_name),
+        file_attributes: data.file_attributes,
+        file_size: (u64::from(data.file_size_high) << 32) | u64::from(data.file_size_low),
+        creation_time: filetime_to_timespec(data.creation_time),
+        last_access_time: filetime_to_timespec(data.last_access_time),
+        last_write_time: filetime_to_timespec(data.last_write_time),
+    }
+}
+
+/// Enumerates a directory's contents — `FindFirstFileW`/`FindNextFileW`,
+/// closing the search handle via `FindClose` on drop (including on an early
+/// `break`, unlike a caller that forgot to check for one). Windows always
+/// reports `.`/`..` as real entries the way Unix `readdir` does (unlike
+/// this crate's other iterators, nothing here filters them — deciding
+/// whether to skip them is the caller's policy, the same way this crate
+/// exposes raw `FILE_ATTRIBUTE_*` bits without deciding what they mean).
+#[derive(Debug)]
+pub struct ReadDir {
+    handle: RawHandle,
+    // `FindFirstFileW` already produced the first entry by the time this
+    // struct exists — `next()` returns it before ever calling
+    // `FindNextFileW`, the same "the opening call already returned data"
+    // shape `process::list_processes`'s `Process32FirstW` loop has.
+    pending: Option<FindDataW>,
+}
+
+impl Iterator for ReadDir {
+    type Item = Result<DirEntry, Win32Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(data) = self.pending.take() {
+            return Some(Ok(dir_entry_from_find_data(&data)));
+        }
+        let mut data = FindDataW::default();
+        // SAFETY: `self.handle` is a valid, currently-open search handle
+        // (from `read_dir`, not yet closed); `data` is a valid,
+        // correctly-sized out-pointer.
+        let found = unsafe { FindNextFileW(self.handle, &mut data) };
+        if found == 0 {
+            // `Process32NextW`'s own end-of-enumeration convention, applied
+            // the same way here: a `FALSE` return with
+            // `GetLastError() == ERROR_NO_MORE_FILES` means "nothing left,"
+            // not a real error.
+            let err = Win32Error::last();
+            return if err == Win32Error::ERROR_NO_MORE_FILES {
+                None
+            } else {
+                Some(Err(err))
+            };
+        }
+        Some(Ok(dir_entry_from_find_data(&data)))
+    }
+}
+
+impl Drop for ReadDir {
+    fn drop(&mut self) {
+        // SAFETY: `self.handle` is a valid, currently-open search handle,
+        // closed exactly once here and never used again after.
+        let _ = unsafe { FindClose(self.handle) };
+    }
+}
+
+/// Start enumerating `pattern` — `FindFirstFileW`. `pattern` may include `?`/
+/// `*` wildcards (Windows' own, resolved by this call directly, not this
+/// crate's `*` glob semantics elsewhere) — pass e.g. `"C:\\dir\\*"` to list
+/// every entry in a directory, matching the standard idiom every Win32
+/// directory-listing example uses.
+pub fn read_dir(pattern: &str) -> Result<ReadDir, Win32Error> {
+    let wide: Vec<u16> = pattern.encode_utf16().chain(core::iter::once(0)).collect();
+    let mut data = FindDataW::default();
+    // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; `data` is a
+    // valid, correctly-sized out-pointer.
+    let handle = unsafe { FindFirstFileW(wide.as_ptr(), &mut data) };
+    if handle.is_null() || handle as isize == INVALID_HANDLE_VALUE {
+        return Err(Win32Error::last());
+    }
+    Ok(ReadDir {
+        handle,
+        pending: Some(data),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,5 +790,49 @@ mod tests {
 
         drop(file);
         std::fs::remove_file(&path).expect("cleaning up the test file should succeed");
+    }
+
+    #[test]
+    fn read_dir_lists_files_created_in_a_temp_directory() {
+        let dir = std::env::temp_dir().join("rusty_win32_read_dir_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).expect("creating the test directory should succeed");
+        std::fs::write(dir.join("a.txt"), b"hello").expect("writing a.txt should succeed");
+        std::fs::write(dir.join("b.txt"), b"world!!").expect("writing b.txt should succeed");
+
+        let pattern = alloc::format!("{}\\*", dir.display());
+        let entries: alloc::vec::Vec<DirEntry> = read_dir(&pattern)
+            .expect("FindFirstFileW should succeed")
+            .collect::<Result<alloc::vec::Vec<_>, _>>()
+            .expect("FindNextFileW should succeed for every entry");
+
+        let names: alloc::vec::Vec<&str> = entries.iter().map(|e| e.file_name.as_str()).collect();
+        assert!(names.contains(&"."), "got: {names:?}");
+        assert!(names.contains(&".."), "got: {names:?}");
+        assert!(names.contains(&"a.txt"), "got: {names:?}");
+        assert!(names.contains(&"b.txt"), "got: {names:?}");
+
+        let a = entries
+            .iter()
+            .find(|e| e.file_name == "a.txt")
+            .expect("a.txt should be listed");
+        assert_eq!(a.file_size, 5);
+        let b = entries
+            .iter()
+            .find(|e| e.file_name == "b.txt")
+            .expect("b.txt should be listed");
+        assert_eq!(b.file_size, 7);
+
+        std::fs::remove_dir_all(&dir).expect("cleaning up the test directory should succeed");
+    }
+
+    #[test]
+    fn read_dir_fails_for_a_nonexistent_directory() {
+        // The parent directory itself is missing, so `FindFirstFileW` reports
+        // `ERROR_PATH_NOT_FOUND`, not `ERROR_FILE_NOT_FOUND` (that one's
+        // reserved for an existing directory with no entries matching the
+        // pattern).
+        let err = read_dir(r"C:\this-directory-should-not-exist-rusty-win32-test\*").unwrap_err();
+        assert_eq!(err, Win32Error::ERROR_PATH_NOT_FOUND);
     }
 }
