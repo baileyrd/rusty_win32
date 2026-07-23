@@ -104,6 +104,19 @@ unsafe extern "system" {
         sid: *mut core::ffi::c_void,
         sid_size: *mut u32,
     ) -> i32;
+    fn ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        sd: *mut core::ffi::c_void,
+        requested_revision: u32,
+        security_information: u32,
+        string_sd: *mut *mut u16,
+        string_sd_len: *mut u32,
+    ) -> i32;
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        string_sd: *const u16,
+        string_sd_revision: u32,
+        sd: *mut *mut core::ffi::c_void,
+        sd_size: *mut u32,
+    ) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -275,6 +288,16 @@ impl PathSecurityInfo {
     /// never decoded structurally by this crate.
     pub fn dacl(&self) -> Option<*mut core::ffi::c_void> {
         self.dacl
+    }
+
+    /// The whole self-relative `PSECURITY_DESCRIPTOR` block
+    /// `path_security_info` fetched (`owner()`/`dacl()` point into this
+    /// same block) — `None` for a value built by hand via
+    /// [`PathSecurityInfo::from_raw_parts`] rather than one
+    /// `path_security_info` returned. Useful as-is for [`sd_to_string`],
+    /// which treats a security descriptor as an opaque blob.
+    pub fn raw_security_descriptor(&self) -> Option<*mut core::ffi::c_void> {
+        self.security_descriptor
     }
 }
 
@@ -1146,6 +1169,113 @@ pub fn well_known_sid(kind: WellKnownSidType) -> Result<SidBuf, crate::error::Wi
     Ok(SidBuf { bytes })
 }
 
+/// `SDDL_REVISION_1` — the only SDDL string format revision
+/// [`sd_to_string`]/[`string_to_sd`] produce/consume. Verified against
+/// mingw-w64's own `sddl.h` with a compiled `_Static_assert` probe.
+const SDDL_REVISION_1: u32 = 1;
+
+/// [`string_to_sd`]'s result — the `PSECURITY_DESCRIPTOR`
+/// `ConvertStringSecurityDescriptorToSecurityDescriptorW` allocated,
+/// freed via `LocalFree` on `Drop`, matching [`ConvertedSid`]/
+/// [`BuiltAcl`]'s existing pattern. Treated as an opaque blob — pass it
+/// to [`sd_to_string`] to render it back to SDDL, matching this module's
+/// existing opaque-security-descriptor treatment (see
+/// [`PathSecurityInfo::raw_security_descriptor`]).
+#[derive(Debug)]
+pub struct ConvertedSecurityDescriptor {
+    sd: *mut core::ffi::c_void,
+}
+
+impl ConvertedSecurityDescriptor {
+    /// The parsed security descriptor, ready to pass to [`sd_to_string`].
+    pub fn as_ptr(&self) -> *mut core::ffi::c_void {
+        self.sd
+    }
+}
+
+impl Drop for ConvertedSecurityDescriptor {
+    fn drop(&mut self) {
+        // SAFETY: `self.sd` is the exact `PSECURITY_DESCRIPTOR` pointer
+        // `ConvertStringSecurityDescriptorToSecurityDescriptorW`
+        // allocated for this value and hasn't been freed yet — freed
+        // here exactly once, on this value's only path to being dropped.
+        let _ = unsafe { LocalFree(self.sd) };
+    }
+}
+
+/// Render `sd` as an SDDL string —
+/// `ConvertSecurityDescriptorToStringSecurityDescriptorW`, a debug/snapshot
+/// (`icacls /save`-style) string representation of a security
+/// descriptor's full permission state. `info` selects which components
+/// to include (`OWNER_SECURITY_INFORMATION`/`GROUP_SECURITY_INFORMATION`/
+/// `DACL_SECURITY_INFORMATION`, matching [`path_security_info`]'s own
+/// parameter) — diverges from this issue's literal `sd_to_string(sd) ->
+/// Result` signature, since the real Win32 function requires a
+/// `SECURITY_INFORMATION` selecting which parts to render; this module
+/// never touches SACLs, so `info` only ever carries the same three bits
+/// [`path_security_info`] does.
+///
+/// # Safety
+///
+/// `sd` must be a valid `PSECURITY_DESCRIPTOR` for the duration of this
+/// call.
+pub unsafe fn sd_to_string(
+    sd: *mut core::ffi::c_void,
+    info: SecurityInfoFlags,
+) -> Result<alloc::string::String, crate::error::Win32Error> {
+    let mut string_sd: *mut u16 = core::ptr::null_mut();
+    let mut len: u32 = 0;
+    // SAFETY: `sd` is caller-supplied per this function's own safety
+    // contract; `string_sd`/`len` are valid out-pointers.
+    let ok = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            sd,
+            SDDL_REVISION_1,
+            info,
+            &mut string_sd,
+            &mut len,
+        )
+    };
+    if ok == 0 {
+        return Err(crate::error::Win32Error::last());
+    }
+    // `len` counts the terminating NUL; trim it before decoding.
+    let char_len = (len as usize).saturating_sub(1);
+    // SAFETY: a successful call guarantees `string_sd` points to at least
+    // `len` valid `u16`s (including the trailing NUL this crate trims),
+    // all part of the same allocation this call just made.
+    let text = alloc::string::String::from_utf16_lossy(unsafe {
+        core::slice::from_raw_parts(string_sd, char_len)
+    });
+    // SAFETY: `string_sd` is the exact pointer
+    // `ConvertSecurityDescriptorToStringSecurityDescriptorW` allocated
+    // for this call and hasn't been freed yet.
+    let _ = unsafe { LocalFree(string_sd.cast()) };
+    Ok(text)
+}
+
+/// Parse an SDDL string back into a security descriptor —
+/// `ConvertStringSecurityDescriptorToSecurityDescriptorW`. The reverse of
+/// [`sd_to_string`].
+pub fn string_to_sd(s: &str) -> Result<ConvertedSecurityDescriptor, crate::error::Win32Error> {
+    let wide: Vec<u16> = s.encode_utf16().chain(core::iter::once(0)).collect();
+    let mut sd: *mut core::ffi::c_void = core::ptr::null_mut();
+    // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string live for the
+    // whole call; `sd` is a valid out-pointer.
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            wide.as_ptr(),
+            SDDL_REVISION_1,
+            &mut sd,
+            core::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(crate::error::Win32Error::last());
+    }
+    Ok(ConvertedSecurityDescriptor { sd })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1635,5 +1765,79 @@ mod tests {
                 local_system.as_ptr().cast_mut(),
             )
         });
+    }
+
+    #[test]
+    fn sd_to_string_produces_an_sddl_string_starting_with_owner() {
+        let path = std::env::temp_dir().join("rusty_win32_security_test_sd_to_string.txt");
+        std::fs::write(&path, b"hello").expect("creating the test file should succeed");
+        let path_str = path.to_str().expect("temp path should be valid UTF-8");
+
+        let info = path_security_info(
+            path_str,
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+        )
+        .expect("GetNamedSecurityInfoW should succeed for a real file");
+        let sd = info
+            .raw_security_descriptor()
+            .expect("a real file's path_security_info should carry a security descriptor block");
+
+        // SAFETY: `sd` is valid from `info`, which stays alive (not yet
+        // dropped) for this whole test.
+        let sddl = unsafe {
+            sd_to_string(
+                sd,
+                OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            )
+        }
+        .expect("ConvertSecurityDescriptorToStringSecurityDescriptorW should succeed");
+        assert!(
+            sddl.starts_with("O:"),
+            "an SDDL string including owner info should start with \"O:\", got: {sddl}"
+        );
+
+        std::fs::remove_file(&path).expect("removing the test file should succeed");
+    }
+
+    #[test]
+    fn sd_to_string_then_string_to_sd_round_trips_to_the_same_sddl_string() {
+        let path = std::env::temp_dir().join("rusty_win32_security_test_sd_round_trip.txt");
+        std::fs::write(&path, b"hello").expect("creating the test file should succeed");
+        let path_str = path.to_str().expect("temp path should be valid UTF-8");
+
+        let requested_info =
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+        let info = path_security_info(path_str, requested_info)
+            .expect("GetNamedSecurityInfoW should succeed for a real file");
+        let sd = info
+            .raw_security_descriptor()
+            .expect("a real file's path_security_info should carry a security descriptor block");
+
+        // SAFETY: `sd` is valid from `info`, which stays alive (not yet
+        // dropped) for this whole test.
+        let original_sddl = unsafe { sd_to_string(sd, requested_info) }
+            .expect("ConvertSecurityDescriptorToStringSecurityDescriptorW should succeed");
+
+        let parsed = string_to_sd(&original_sddl)
+            .expect("ConvertStringSecurityDescriptorToSecurityDescriptorW should succeed");
+        // SAFETY: `parsed`'s SD is still alive (not yet dropped) for this
+        // whole call.
+        let round_tripped_sddl = unsafe { sd_to_string(parsed.as_ptr(), requested_info) }
+            .expect("ConvertSecurityDescriptorToStringSecurityDescriptorW should succeed on the round-tripped SD");
+        assert_eq!(
+            original_sddl, round_tripped_sddl,
+            "converting to SDDL, back to a security descriptor, and back to SDDL again should be stable"
+        );
+
+        std::fs::remove_file(&path).expect("removing the test file should succeed");
+    }
+
+    #[test]
+    fn string_to_sd_fails_for_a_malformed_string() {
+        let result = string_to_sd("not a valid sddl string");
+        assert!(
+            result.is_err(),
+            "ConvertStringSecurityDescriptorToSecurityDescriptorW should fail on malformed input"
+        );
     }
 }

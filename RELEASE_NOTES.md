@@ -6,6 +6,27 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #235 — security: add sd_to_string/string_to_sd
+**2026-07-23** · [#235](https://github.com/baileyrd/rusty_win32/pull/235)
+
+- **Added:** `security::sd_to_string`/`security::string_to_sd`
+  (`ConvertSecurityDescriptorToStringSecurityDescriptorW`/
+  `ConvertStringSecurityDescriptorToSecurityDescriptorW`) plus
+  `ConvertedSecurityDescriptor` (freeing via `LocalFree` on `Drop`,
+  matching `ConvertedSid`/`BuiltAcl`'s existing pattern), closing issue
+  #164 — a debug/snapshot (`icacls /save`-style) SDDL string
+  representation of a security descriptor's full permission state.
+  `sd_to_string` takes an `info: SecurityInfoFlags` parameter (reusing
+  `path_security_info`'s own type) selecting which components to render
+  — diverges from the issue's literal `sd_to_string(sd) -> Result`
+  signature, since the real Win32 function requires a
+  `SECURITY_INFORMATION` selecting owner/group/DACL/SACL. Also adds
+  `PathSecurityInfo::raw_security_descriptor`, a new accessor exposing
+  the whole self-relative SD block `path_security_info` fetches (needed
+  to round-trip test `sd_to_string` against a real file). This completes
+  the `security` module's first round-2 batch — issues #154 through
+  #164, PRs #225-#235.
+
 ## PR #234 — security: add well_known_sid
 **2026-07-23** · [#234](https://github.com/baileyrd/rusty_win32/pull/234)
 

@@ -5,6 +5,14 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `security::sd_to_string`/`security::string_to_sd`
+  (`ConvertSecurityDescriptorToStringSecurityDescriptorW`/
+  `ConvertStringSecurityDescriptorToSecurityDescriptorW`) plus
+  `ConvertedSecurityDescriptor` (freeing via `LocalFree` on `Drop`) and a
+  new `PathSecurityInfo::raw_security_descriptor` accessor — a
+  debug/snapshot (`icacls /save`-style) SDDL string representation of a
+  security descriptor's full permission state. This completes the
+  `security` module's first round-2 batch (issues #154-#164).
 - `security::well_known_sid` (`CreateWellKnownSid`) plus `WellKnownSidType`
   (`Everyone`/`LocalSystem`/`BuiltinAdministrators`) — construct a
   well-known SID without a name-lookup round trip.
