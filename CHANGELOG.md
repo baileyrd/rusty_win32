@@ -119,6 +119,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `handle::create_mutex`/`handle::release_mutex`
   (`CreateMutexW`/`ReleaseMutex`), the Windows analog of `flock`'s
   cross-process locking — another parity-loop find.
+- `fs::lock_file`/`fs::unlock_file` (`LockFileEx`/`UnlockFileEx`), advisory
+  file-level locking — the last of the 32 parity-loop finds from
+  `gap-analysis.md`.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
