@@ -11,11 +11,13 @@ standalone.
 
 **Non-goals:** a `std::process::Command`/`std::fs` replacement (use those
 directly wherever they already work — this crate exists only for the gap
-they can't cover, e.g. `CREATE_SUSPENDED` spawning); a general-purpose Win32
-bindings crate (each module exists because a specific `rush`/`rusty_lines`
-call site needs it, not for API completeness); a portable abstraction layer
-(no `cfg(unix)` branch anywhere in this crate — that split lives one level up,
-in `rush`'s own `sys` module).
+they can't cover, e.g. `CREATE_SUSPENDED` spawning); a portable abstraction
+layer (no `cfg(unix)` branch anywhere in this crate — that split lives one
+level up, in `rush`'s own `sys` module). Most modules exist because a
+specific `rush`/`rusty_lines` call site needs them; a smaller "round 2" set
+(see `gap-analysis.md`) was added for Win32 parity/completeness on explicit
+direction, without a current consumer — those are called out as such in
+`lib.rs`'s module docs rather than pretending a call site exists.
 
 ## Boundaries
 Not a ports-and-adapters web service — there's no domain logic to keep free
@@ -64,13 +66,6 @@ for this crate, with `docs/adr/` reserved for a small number of
 higher-level, cross-module decisions.
 
 ## Non-goals
-- **ConPTY.** `CreatePseudoConsole` hosts a *child* process's console session
-  (what a terminal emulator does) — `rusty_lines` reads from its own
-  inherited stdin instead, so `GetConsoleMode`/`SetConsoleMode` is the actual
-  analog it needs, not ConPTY. Revisit only if a real "host a child's
-  terminal" feature (e.g. a `script`-like recorder) appears.
-- **Networking, registry, and service-management APIs.** No current or
-  near-term `rush`/`rusty_lines` feature needs them.
 - **Command-line quoting/escaping.** `process::spawn_suspended` takes an
   already-built command line; Windows argv quoting is the caller's
   responsibility (`std::process::Command` already solves it correctly, and
