@@ -1219,46 +1219,22 @@ mod tests {
     }
 
     #[test]
-    fn attach_reattaches_to_a_console_a_child_process_shares() {
+    fn attach_fails_when_a_console_is_already_attached() {
         let _ = ensure_console_stdin(); // guarantee a console exists first
-        // A child spawned without `CREATE_NEW_CONSOLE` inherits/shares the
-        // calling process's exact console, so it stays alive and attached
-        // to that same console even after this process detaches from it —
-        // making the child's pid a reliable, self-contained target for
-        // `attach`, without depending on whatever console (if any) this
-        // test process's own real parent happens to have.
-        // SAFETY: a hand-built, correctly quoted command line for a
-        // well-known system binary.
-        let spawned = unsafe {
-            crate::process::spawn_suspended(
-                "cmd.exe /c ping -n 5 127.0.0.1 >nul",
-                false,
-                false,
-                None,
-            )
-        }
-        .expect("CreateProcessW should succeed");
-        // SAFETY: `spawned.thread` is a freshly created, valid,
-        // not-yet-resumed thread handle.
-        unsafe { crate::process::resume(spawned.thread) }.expect("ResumeThread should succeed");
-
-        free().expect("FreeConsole should succeed while a console is attached");
-        attach(Some(spawned.process_id))
-            .expect("AttachConsole should succeed against the child's shared console");
-        assert!(
-            open_console("CONIN$").is_some(),
-            "the console reattached to should be openable"
-        );
-
-        // SAFETY: `spawned.process` is a valid, currently-open handle;
-        // ending the helper child now that the test is done with it.
-        unsafe { crate::process::terminate(spawned.process, 0) }
-            .expect("TerminateProcess should succeed");
-        // SAFETY: both handles are valid and each closed exactly once.
-        unsafe {
-            crate::handle::close(spawned.process).unwrap();
-            crate::handle::close(spawned.thread).unwrap();
-        }
+        // Deliberately never call `free()` here: unlike
+        // `free_then_alloc_round_trips_to_a_working_console`, this test
+        // doesn't need to detach at all — `AttachConsole` is documented to
+        // reject the call outright whenever the calling process already
+        // has a console, before it even looks at the target pid. That
+        // makes this exercise `attach`'s error path without ever leaving
+        // the shared test-process console detached, which a prior version
+        // of this test did (attaching to a spawned child's inherited
+        // console) — CI proved that reattachment doesn't reliably succeed
+        // in this hosting environment, and a failed `attach()` after an
+        // unconditional `free()` left the process console-less for every
+        // test that ran after it alphabetically.
+        let err = attach(None).expect_err("AttachConsole should fail: already have a console");
+        assert_eq!(err, Win32Error::ERROR_ACCESS_DENIED);
     }
 
     #[test]
