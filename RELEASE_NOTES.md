@@ -6,6 +6,16 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #206 — path: add system_directory/windows_directory (GetSystemDirectoryW/GetWindowsDirectoryW)
+**2026-07-23** · [#206](https://github.com/baileyrd/rusty_win32/pull/206)
+
+- **Added:** `path::system_directory`/`path::windows_directory`
+  (`GetSystemDirectoryW`/`GetWindowsDirectoryW`), closing issue #135 —
+  standard well-known-location primitives (`C:\Windows\System32`/
+  `C:\Windows`), the Windows analog of resolving `/usr/bin`. Another
+  round-2 "weak/no clear consumer" item (`gap-analysis.md`); no current
+  `rush` feature asks for this.
+
 ## PR #205 — process: add tick_count (GetTickCount64)
 **2026-07-23** · [#205](https://github.com/baileyrd/rusty_win32/pull/205)
 

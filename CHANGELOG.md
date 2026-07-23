@@ -175,6 +175,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `process::tick_count` (`GetTickCount64`), a coarser, simpler monotonic
   counter alongside `time::now_monotonic`'s high-resolution one —
   another round-2 item.
+- `path::system_directory`/`path::windows_directory`
+  (`GetSystemDirectoryW`/`GetWindowsDirectoryW`), standard
+  well-known-location primitives (`C:\Windows\System32`/`C:\Windows`) —
+  another round-2 item.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
