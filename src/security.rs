@@ -1342,6 +1342,10 @@ mod tests {
         let mut buf = [0u8; 1];
         let err = initialize_acl(&mut buf)
             .expect_err("InitializeAcl should fail for a buffer smaller than a minimal ACL");
-        assert_eq!(err, crate::error::Win32Error::ERROR_INVALID_PARAMETER);
+        // `InitializeAcl` reports a too-small buffer as `ERROR_INSUFFICIENT_BUFFER`
+        // (122), not `ERROR_INVALID_PARAMETER` -- confirmed by CI on real
+        // Windows (windows-latest), not documented clearly enough to have
+        // guessed correctly up front.
+        assert_eq!(err, crate::error::Win32Error::ERROR_INSUFFICIENT_BUFFER);
     }
 }
