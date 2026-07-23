@@ -6,6 +6,29 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #225 — security: add path_security_info/set_path_security_info
+**2026-07-23** · [#225](https://github.com/baileyrd/rusty_win32/pull/225)
+
+- **Added:** new `security` module — `security::path_security_info`/
+  `security::set_path_security_info` (`GetNamedSecurityInfoW`/
+  `SetNamedSecurityInfoW`) plus `PathSecurityInfo` and
+  `SecurityInfoFlags` (`OWNER_SECURITY_INFORMATION`/
+  `GROUP_SECURITY_INFORMATION`/`DACL_SECURITY_INFORMATION`), closing
+  issue #154 — the core path → owner `PSID`/DACL `PACL` round trip an
+  `icacls`/`ls -l`/`chmod`/`chown`-equivalent is built on. `PSID`/`PACL`
+  stay opaque pointers this crate never decodes structurally (per
+  `gap-analysis.md`'s design notes, unlike this crate's usual
+  `_Static_assert`-verified struct mirrors); `PathSecurityInfo` frees the
+  whole `PSECURITY_DESCRIPTOR` block via `LocalFree` on `Drop` — this
+  crate's second `Drop` impl (after `volume::FindVolumes`). Tested via a
+  self-contained round trip: read a real file's own owner/DACL, then
+  re-apply them back onto itself (always permitted without elevated
+  privilege), since SID-construction primitives
+  (`well_known_sid`/`ConvertStringSidToSidW`) are later round-2 items
+  this crate doesn't have yet. First piece of a subsystem previously
+  excluded by this crate's own non-goals, now in scope per explicit
+  round-2 direction.
+
 ## PR #224 — registry: add delete_tree
 **2026-07-23** · [#224](https://github.com/baileyrd/rusty_win32/pull/224)
 
