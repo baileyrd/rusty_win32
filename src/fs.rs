@@ -228,6 +228,11 @@ unsafe extern "system" {
     fn FindFirstFileW(file_name: *const u16, find_file_data: *mut FindDataW) -> RawHandle;
     fn FindNextFileW(find_file: RawHandle, find_file_data: *mut FindDataW) -> i32;
     fn FindClose(find_file: RawHandle) -> i32;
+    fn CopyFileW(
+        existing_file_name: *const u16,
+        new_file_name: *const u16,
+        fail_if_exists: i32,
+    ) -> i32;
 }
 
 // WIN32_FIND_DATAW: `size_of` 592, `align_of` 4 on x86_64. Verified against
@@ -374,6 +379,29 @@ pub unsafe fn stat_by_handle(handle: RawHandle) -> Result<FileInfoByHandle, Win3
         link_count: info.number_of_links,
         file_index: (u64::from(info.file_index_high) << 32) | u64::from(info.file_index_low),
     })
+}
+
+/// Copy `from` to `to` — `CopyFileW`, the primitive behind a `cp` builtin.
+/// `fail_if_exists`, true, refuses to overwrite an already-existing `to`
+/// (reporting [`Win32Error::ERROR_FILE_EXISTS`]); false overwrites it, the
+/// same choice `CopyFileW`'s own `bFailIfExists` parameter makes — this
+/// crate doesn't decide that policy itself.
+pub fn copy_file(from: &str, to: &str, fail_if_exists: bool) -> Result<(), Win32Error> {
+    let from_wide: Vec<u16> = from.encode_utf16().chain(core::iter::once(0)).collect();
+    let to_wide: Vec<u16> = to.encode_utf16().chain(core::iter::once(0)).collect();
+    // SAFETY: `from_wide`/`to_wide` are valid, NUL-terminated UTF-16 strings.
+    let ok = unsafe {
+        CopyFileW(
+            from_wide.as_ptr(),
+            to_wide.as_ptr(),
+            i32::from(fail_if_exists),
+        )
+    };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
 }
 
 /// Create a symbolic link at `link_path` pointing at `target_path` —
@@ -834,5 +862,39 @@ mod tests {
         // pattern).
         let err = read_dir(r"C:\this-directory-should-not-exist-rusty-win32-test\*").unwrap_err();
         assert_eq!(err, Win32Error::ERROR_PATH_NOT_FOUND);
+    }
+
+    #[test]
+    fn copy_file_copies_content_to_a_new_path() {
+        let dir = std::env::temp_dir().join("rusty_win32_copy_file_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).expect("creating the test directory should succeed");
+        let from = dir.join("source.txt");
+        let to = dir.join("dest.txt");
+        std::fs::write(&from, b"hello copy").expect("writing the source file should succeed");
+
+        copy_file(from.to_str().unwrap(), to.to_str().unwrap(), false)
+            .expect("CopyFileW should succeed");
+
+        let copied = std::fs::read(&to).expect("the copied file should exist and be readable");
+        assert_eq!(copied, b"hello copy");
+
+        std::fs::remove_dir_all(&dir).expect("cleaning up the test directory should succeed");
+    }
+
+    #[test]
+    fn copy_file_fails_when_fail_if_exists_and_destination_already_exists() {
+        let dir = std::env::temp_dir().join("rusty_win32_copy_file_exists_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).expect("creating the test directory should succeed");
+        let from = dir.join("source.txt");
+        let to = dir.join("dest.txt");
+        std::fs::write(&from, b"hello").expect("writing the source file should succeed");
+        std::fs::write(&to, b"already here").expect("writing the destination file should succeed");
+
+        let err = copy_file(from.to_str().unwrap(), to.to_str().unwrap(), true).unwrap_err();
+        assert_eq!(err, Win32Error::ERROR_FILE_EXISTS);
+
+        std::fs::remove_dir_all(&dir).expect("cleaning up the test directory should succeed");
     }
 }
