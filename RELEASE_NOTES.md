@@ -6,6 +6,19 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #93 — process: add image_path (QueryFullProcessImageNameW)
+**2026-07-23** · [#93](https://github.com/baileyrd/rusty_win32/pull/93)
+
+- **Added:** `process::image_path` (`QueryFullProcessImageNameW`), closing
+  issue #60 from the parity-loop sweep. Completes `list_processes`'s
+  `ProcessEntry::exe_file` (issue #21, `PROCESSENTRY32W.szExeFile`), which
+  is only ever a bare filename, not a full path — needed for a `ps`-style
+  listing that wants to show each process's real executable path. Unlike
+  this crate's other growing-buffer calls, `QueryFullProcessImageNameW`
+  doesn't report the size actually required on a "buffer too small"
+  failure, so this doubles the buffer and retries instead of growing to an
+  exact reported size.
+
 ## PR #92 — process: add process_id_of (GetProcessId)
 **2026-07-23** · [#92](https://github.com/baileyrd/rusty_win32/pull/92)
 
