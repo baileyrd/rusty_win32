@@ -5,6 +5,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `security::sid_length`/`security::is_valid_sid`/`security::copy_sid`
+  (`GetLengthSid`/`IsValidSid`/`CopySid`) — sizing, validity-checking, and
+  owned-copying of an opaque `PSID`, needed anywhere a SID must outlive
+  the short-lived buffer it was originally borrowed from (e.g. an
+  owner/ACE SID from `path_security_info`/`acl_entries`). `copy_sid`
+  reuses the existing `SidBuf` type rather than introducing a new one.
 - `security::initialize_acl`/`security::add_access_allowed_ace`/
   `security::add_access_denied_ace` (`InitializeAcl`/
   `AddAccessAllowedAce`/`AddAccessDeniedAce`) — the lower-level,
