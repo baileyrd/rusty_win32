@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `console::alloc`/`console::free`/`console::attach` (`AllocConsole`/
+  `FreeConsole`/`AttachConsole`), letting a GUI-subsystem process acquire,
+  release, or reattach to a console on demand (`attach(None)` maps to
+  `ATTACH_PARENT_PROCESS`). This crate's own tests already used
+  `AllocConsole` internally; it's now exposed as public API too.
 - `process::spawn_suspended`'s `new_process_group` parameter and
   `console::generate_ctrl_event`, for interrupting one background child via
   a targeted `CTRL_BREAK_EVENT` instead of affecting the whole console.

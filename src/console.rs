@@ -91,6 +91,9 @@ unsafe extern "system" {
     fn SetConsoleOutputCP(code_page_id: u32) -> i32;
     fn GetConsoleTitleW(console_title: *mut u16, size: u32) -> u32;
     fn SetConsoleTitleW(console_title: *const u16) -> i32;
+    fn AllocConsole() -> i32;
+    fn FreeConsole() -> i32;
+    fn AttachConsole(process_id: u32) -> i32;
 }
 
 // `MapVirtualKeyW` lives in user32.dll, not kernel32.dll — this crate's
@@ -721,6 +724,54 @@ pub fn window_handle() -> Option<*mut core::ffi::c_void> {
     if hwnd.is_null() { None } else { Some(hwnd) }
 }
 
+/// `AttachConsole`'s `dwProcessId` sentinel: attach to the console of the
+/// calling process's own parent, rather than a specific pid.
+pub const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+
+/// Allocate a brand-new console for the calling process — `AllocConsole`.
+/// Fails with `ERROR_ACCESS_DENIED` if the process already has a console.
+/// Needed by a GUI-subsystem process that wants to acquire a console on
+/// demand; this crate's own tests already use `AllocConsole` internally
+/// (see `ensure_console_stdin` below) but hadn't exposed it as public API
+/// until now. No current `rush` feature asks for this; filed for Win32
+/// parity.
+pub fn alloc() -> Result<(), Win32Error> {
+    // SAFETY: `AllocConsole` takes no arguments and has no precondition.
+    if unsafe { AllocConsole() } == 0 {
+        return Err(Win32Error::last());
+    }
+    Ok(())
+}
+
+/// Detach the calling process from its console — `FreeConsole`. A
+/// GUI-subsystem process that acquired a console via [`alloc`] (or
+/// inherited one) can use this to give it up again, e.g. before calling
+/// [`alloc`] a second time to create a fresh one.
+pub fn free() -> Result<(), Win32Error> {
+    // SAFETY: `FreeConsole` takes no arguments and has no precondition.
+    if unsafe { FreeConsole() } == 0 {
+        return Err(Win32Error::last());
+    }
+    Ok(())
+}
+
+/// Attach the calling process to the console of another process —
+/// `AttachConsole`. `pid = None` maps to `ATTACH_PARENT_PROCESS`, attaching
+/// to whatever console (if any) launched this process — the usual case
+/// for a GUI-subsystem process that wants to reuse a console its parent
+/// already has, rather than allocate its own via [`alloc`]. The calling
+/// process must not already have a console (see [`free`]).
+pub fn attach(pid: Option<u32>) -> Result<(), Win32Error> {
+    let process_id = pid.unwrap_or(ATTACH_PARENT_PROCESS);
+    // SAFETY: `AttachConsole` takes a plain `DWORD` process id (or the
+    // documented `ATTACH_PARENT_PROCESS` sentinel) and has no other
+    // precondition.
+    if unsafe { AttachConsole(process_id) } == 0 {
+        return Err(Win32Error::last());
+    }
+    Ok(())
+}
+
 /// Synthesize `text` as a sequence of real console key events —
 /// `WriteConsoleInputW`, the standard, documented technique console
 /// automation tools use to inject keystrokes (queues `INPUT_RECORD`s into
@@ -895,7 +946,6 @@ mod tests {
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn AllocConsole() -> i32;
         fn CreateFileW(
             file_name: *const u16,
             desired_access: u32,
@@ -959,12 +1009,11 @@ mod tests {
         if let Some(h) = open_console("CONIN$") {
             return h;
         }
-        // SAFETY: `AllocConsole` has no precondition; a failure here (e.g.
-        // a console already exists under a name this function didn't
-        // manage to open for an unrelated reason) is handled by the
-        // `expect` below surfacing a clear panic rather than silently
-        // returning a null/invalid handle.
-        unsafe { AllocConsole() };
+        // A failure here (e.g. a console already exists under a name this
+        // function didn't manage to open for an unrelated reason) is
+        // handled by the `expect` below surfacing a clear panic rather
+        // than silently returning a null/invalid handle.
+        let _ = alloc();
         open_console("CONIN$").expect("AllocConsole should provide an openable console")
     }
 
@@ -1149,6 +1198,67 @@ mod tests {
             first, second,
             "GetConsoleWindow should report the same answer on repeated calls"
         );
+    }
+
+    #[test]
+    fn alloc_fails_when_a_console_is_already_attached() {
+        let _ = ensure_console_stdin(); // guarantee a console exists first
+        let err = alloc().expect_err("AllocConsole should fail: a console is already attached");
+        assert_eq!(err, Win32Error::ERROR_ACCESS_DENIED);
+    }
+
+    #[test]
+    fn free_then_alloc_round_trips_to_a_working_console() {
+        let _ = ensure_console_stdin(); // guarantee a console exists first
+        free().expect("FreeConsole should succeed while a console is attached");
+        alloc().expect("AllocConsole should succeed once no console is attached");
+        assert!(
+            open_console("CONIN$").is_some(),
+            "a fresh console from alloc() should be openable"
+        );
+    }
+
+    #[test]
+    fn attach_reattaches_to_a_console_a_child_process_shares() {
+        let _ = ensure_console_stdin(); // guarantee a console exists first
+        // A child spawned without `CREATE_NEW_CONSOLE` inherits/shares the
+        // calling process's exact console, so it stays alive and attached
+        // to that same console even after this process detaches from it —
+        // making the child's pid a reliable, self-contained target for
+        // `attach`, without depending on whatever console (if any) this
+        // test process's own real parent happens to have.
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known system binary.
+        let spawned = unsafe {
+            crate::process::spawn_suspended(
+                "cmd.exe /c ping -n 5 127.0.0.1 >nul",
+                false,
+                false,
+                None,
+            )
+        }
+        .expect("CreateProcessW should succeed");
+        // SAFETY: `spawned.thread` is a freshly created, valid,
+        // not-yet-resumed thread handle.
+        unsafe { crate::process::resume(spawned.thread) }.expect("ResumeThread should succeed");
+
+        free().expect("FreeConsole should succeed while a console is attached");
+        attach(Some(spawned.process_id))
+            .expect("AttachConsole should succeed against the child's shared console");
+        assert!(
+            open_console("CONIN$").is_some(),
+            "the console reattached to should be openable"
+        );
+
+        // SAFETY: `spawned.process` is a valid, currently-open handle;
+        // ending the helper child now that the test is done with it.
+        unsafe { crate::process::terminate(spawned.process, 0) }
+            .expect("TerminateProcess should succeed");
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+        }
     }
 
     #[test]

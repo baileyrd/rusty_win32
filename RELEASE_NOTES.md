@@ -6,6 +6,19 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #211 — console: add alloc/free/attach (AllocConsole/FreeConsole/AttachConsole)
+**2026-07-23** · [#211](https://github.com/baileyrd/rusty_win32/pull/211)
+
+- **Added:** `console::alloc`/`console::free`/`console::attach`
+  (`AllocConsole`/`FreeConsole`/`AttachConsole`), closing issue #140 — lets a
+  GUI-subsystem process acquire a console on demand, release it, or attach
+  to another process's (`attach(None)` maps to `ATTACH_PARENT_PROCESS`).
+  This crate's own test helper (`ensure_console_stdin`) already used
+  `AllocConsole` internally; it now calls through the public `alloc()`
+  instead of a private duplicate extern. Another round-2 "weak/no clear
+  consumer" item (`gap-analysis.md`); no current `rush` feature asks for
+  this.
+
 ## PR #210 — console: add window_handle (GetConsoleWindow)
 **2026-07-23** · [#210](https://github.com/baileyrd/rusty_win32/pull/210)
 
