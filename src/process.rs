@@ -104,6 +104,7 @@ unsafe extern "system" {
     fn Sleep(milliseconds: u32);
     fn GetSystemInfo(system_info: *mut SystemInfo);
     fn GetComputerNameW(buffer: *mut u16, size: *mut u32) -> i32;
+    fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
     fn QueryFullProcessImageNameW(
         process: RawHandle,
         flags: u32,
@@ -234,6 +235,34 @@ const _: () = assert!(core::mem::offset_of!(SystemInfo, processor_type) == 36);
 const _: () = assert!(core::mem::offset_of!(SystemInfo, allocation_granularity) == 40);
 const _: () = assert!(core::mem::offset_of!(SystemInfo, processor_level) == 44);
 const _: () = assert!(core::mem::offset_of!(SystemInfo, processor_revision) == 46);
+
+// MEMORYSTATUSEX: `size_of` 64, `align_of` 8 on x86_64. Verified against
+// mingw-w64's `sysinfoapi.h`/`winbase.h` the same way as this crate's other
+// structs (a `_Static_assert` probe compiled with `x86_64-w64-mingw32-gcc`
+// against the real header).
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct MemoryStatusEx {
+    length: u32,
+    memory_load: u32,
+    total_phys: u64,
+    avail_phys: u64,
+    total_page_file: u64,
+    avail_page_file: u64,
+    total_virtual: u64,
+    avail_virtual: u64,
+    avail_extended_virtual: u64,
+}
+const _: () = assert!(core::mem::size_of::<MemoryStatusEx>() == 64);
+const _: () = assert!(core::mem::align_of::<MemoryStatusEx>() == 8);
+const _: () = assert!(core::mem::offset_of!(MemoryStatusEx, memory_load) == 4);
+const _: () = assert!(core::mem::offset_of!(MemoryStatusEx, total_phys) == 8);
+const _: () = assert!(core::mem::offset_of!(MemoryStatusEx, avail_phys) == 16);
+const _: () = assert!(core::mem::offset_of!(MemoryStatusEx, total_page_file) == 24);
+const _: () = assert!(core::mem::offset_of!(MemoryStatusEx, avail_page_file) == 32);
+const _: () = assert!(core::mem::offset_of!(MemoryStatusEx, total_virtual) == 40);
+const _: () = assert!(core::mem::offset_of!(MemoryStatusEx, avail_virtual) == 48);
+const _: () = assert!(core::mem::offset_of!(MemoryStatusEx, avail_extended_virtual) == 56);
 
 /// 100ns ticks between the FILETIME epoch (1601-01-01) and the Unix epoch
 /// (1970-01-01) — the same standard conversion constant `time.rs`/`fs.rs` use.
@@ -957,6 +986,55 @@ pub fn computer_name() -> Result<alloc::string::String, Win32Error> {
     Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
 }
 
+/// System-wide memory totals and load — `GlobalMemoryStatusEx`, the
+/// primitive behind a `free`-style builtin or general resource reporting.
+/// Omits the raw struct's `ullAvailExtendedVirtual` field: it's only
+/// meaningful for Address Windowing Extensions memory, out of this crate's
+/// current scope, and documented as always `0` otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryStatus {
+    /// Approximate percentage of physical memory currently in use (`0..=100`).
+    pub memory_load: u32,
+    /// Total physical memory, in bytes.
+    pub total_phys: u64,
+    /// Available physical memory, in bytes.
+    pub avail_phys: u64,
+    /// Total size of the page (swap) file(s), in bytes.
+    pub total_page_file: u64,
+    /// Available size of the page (swap) file(s), in bytes.
+    pub avail_page_file: u64,
+    /// Total size of the calling process's user-mode virtual address space,
+    /// in bytes.
+    pub total_virtual: u64,
+    /// Available (unreserved, uncommitted) size of the calling process's
+    /// user-mode virtual address space, in bytes.
+    pub avail_virtual: u64,
+}
+
+/// System-wide memory totals and load — `GlobalMemoryStatusEx`.
+pub fn memory_status() -> Result<MemoryStatus, Win32Error> {
+    let mut info = MemoryStatusEx {
+        length: core::mem::size_of::<MemoryStatusEx>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `info` is a valid, correctly-sized out-pointer with `length`
+    // set to `sizeof(MEMORYSTATUSEX)` per this call's own documented
+    // requirement.
+    let ok = unsafe { GlobalMemoryStatusEx(&mut info) };
+    if ok == 0 {
+        return Err(Win32Error::last());
+    }
+    Ok(MemoryStatus {
+        memory_load: info.memory_load,
+        total_phys: info.total_phys,
+        avail_phys: info.avail_phys,
+        total_page_file: info.total_page_file,
+        avail_page_file: info.avail_page_file,
+        total_virtual: info.total_virtual,
+        avail_virtual: info.avail_virtual,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1418,6 +1496,28 @@ mod tests {
         assert!(
             name.eq_ignore_ascii_case(&env_name),
             "expected {env_name:?}, got {name:?}"
+        );
+    }
+
+    #[test]
+    fn memory_status_reports_plausible_values() {
+        let status = memory_status().expect("GlobalMemoryStatusEx should succeed");
+        assert!(
+            status.memory_load <= 100,
+            "memory load should be a percentage, got {}",
+            status.memory_load
+        );
+        assert!(
+            status.total_phys > 0,
+            "a real machine should report nonzero total physical memory"
+        );
+        assert!(
+            status.avail_phys <= status.total_phys,
+            "available physical memory can't exceed the total"
+        );
+        assert!(
+            status.avail_page_file <= status.total_page_file,
+            "available page-file space can't exceed the total"
         );
     }
 }

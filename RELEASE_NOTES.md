@@ -6,6 +6,16 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #106 — process: add memory_status (GlobalMemoryStatusEx)
+**2026-07-23** · [#106](https://github.com/baileyrd/rusty_win32/pull/106)
+
+- **Added:** `process::memory_status` (`GlobalMemoryStatusEx`), returning a
+  `MemoryStatus` (memory load percentage, total/available physical memory,
+  total/available page-file space, total/available virtual address space)
+  — closing issue #73 from the parity-loop sweep, the primitive behind a
+  `free`-style builtin or general resource reporting. `MEMORYSTATUSEX`'s
+  layout independently verified via a compiled mingw-w64 C probe.
+
 ## PR #105 — process: add computer_name (GetComputerNameW)
 **2026-07-23** · [#105](https://github.com/baileyrd/rusty_win32/pull/105)
 
