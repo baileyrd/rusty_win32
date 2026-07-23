@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `security::acl_entries` (`GetAclInformation` + `GetAce`) plus
+  `AclEntry`/`AceKind` and a fixed-header-only `Acl` mirror — enumerate a
+  DACL/SACL's ACEs one at a time, turning an opaque ACL into the
+  human-readable permission list `icacls`/`ls -l` displays.
 - `security` module (new subsystem): `security::path_security_info`/
   `security::set_path_security_info` (`GetNamedSecurityInfoW`/
   `SetNamedSecurityInfoW`, freeing via `LocalFree` on `Drop`) plus the
