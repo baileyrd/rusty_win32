@@ -6,6 +6,18 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #107 — process: add set_error_mode (SetErrorMode)
+**2026-07-23** · [#107](https://github.com/baileyrd/rusty_win32/pull/107)
+
+- **Added:** `process::set_error_mode` (`SetErrorMode`) plus the
+  `SEM_FAILCRITICALERRORS`/`SEM_NOOPENFILEERRORBOX` constants, closing
+  issue #74 from the parity-loop sweep. Without
+  `SEM_FAILCRITICALERRORS`, a hardware/media error (e.g. an empty
+  removable drive, a network path that's gone away) pops a blocking GUI
+  dialog that freezes the whole process — including a non-interactive
+  script run with no one there to click it. A real robustness gap worth
+  closing early in a shell's own startup path, not just a nice-to-have.
+
 ## PR #106 — process: add memory_status (GlobalMemoryStatusEx)
 **2026-07-23** · [#106](https://github.com/baileyrd/rusty_win32/pull/106)
 
