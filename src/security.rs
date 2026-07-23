@@ -49,6 +49,12 @@ unsafe extern "system" {
         acl_information_class: u32,
     ) -> i32;
     fn GetAce(acl: *const Acl, ace_index: u32, ace: *mut *mut core::ffi::c_void) -> i32;
+    fn SetEntriesInAclW(
+        count: u32,
+        entries: *const ExplicitAccess,
+        old_acl: *const Acl,
+        new_acl: *mut *mut Acl,
+    ) -> u32;
 }
 
 #[link(name = "kernel32")]
@@ -405,6 +411,171 @@ pub unsafe fn acl_entries(
     Ok(entries)
 }
 
+/// `MULTIPLE_TRUSTEE_OPERATION`'s only value this module supports — the
+/// "multiple trustee" chaining feature (`TRUSTEE_W::pMultipleTrustee`)
+/// is an obscure, rarely-used mechanism out of this module's scope;
+/// every [`Trustee`] this crate builds names exactly one principal.
+const NO_MULTIPLE_TRUSTEE: i32 = 0;
+
+/// `TRUSTEE_FORM` — whether a [`Trustee`]'s name field holds a `PSID` or
+/// a wide string name. Only these two ordinary forms are supported
+/// (`TRUSTEE_BAD_FORM` and the object-specific `_AND_SID`/`_AND_NAME`
+/// variants are out of scope). Verified against mingw-w64's own
+/// `aclapi.h` with a compiled `_Static_assert` probe.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrusteeForm {
+    Sid = 0,
+    Name = 1,
+}
+
+/// `TRUSTEE_TYPE` — what kind of principal a [`Trustee`] names. Only
+/// the commonly-used variants are exposed; the rest (`TRUSTEE_IS_DOMAIN`/
+/// `_ALIAS`/`_DELETED`/`_INVALID`/`_COMPUTER`) aren't needed for an
+/// ordinary user/group ACL entry.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrusteeType {
+    Unknown = 0,
+    User = 1,
+    Group = 2,
+    WellKnownGroup = 5,
+}
+
+// TRUSTEE_W: `size_of` 32, `align_of` 8 — verified against mingw-w64's
+// own `aclapi.h` with a compiled `_Static_assert` probe. Genuinely
+// fixed-size, unlike `Acl`/`PSID` — an ordinary FFI-mirror struct with
+// full field access, per `gap-analysis.md`'s design notes for this
+// module.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Trustee {
+    multiple_trustee: *mut Trustee,
+    multiple_trustee_operation: i32,
+    trustee_form: TrusteeForm,
+    trustee_type: TrusteeType,
+    /// The real `TRUSTEE_W::ptstrName` field — either a `PSID` (when
+    /// `trustee_form` is [`TrusteeForm::Sid`]) or a NUL-terminated wide
+    /// string (when [`TrusteeForm::Name`]), reinterpreted either way
+    /// through this same `LPWCH`-typed slot, matching the real
+    /// `TRUSTEE_W`'s own union-by-convention use of this field.
+    name: *mut u16,
+}
+
+impl Trustee {
+    /// Build a `Trustee` naming a `PSID` — `TrusteeForm::Sid`. The
+    /// primitives that would normally build one from a name or a
+    /// well-known identity (`BuildTrusteeWithSidW`/`CreateWellKnownSid`)
+    /// are later round-2 items this crate doesn't have yet; a caller
+    /// today supplies an already-obtained `PSID`, e.g. one
+    /// [`PathSecurityInfo::owner`] returned.
+    ///
+    /// # Safety
+    ///
+    /// `sid` must be a valid `PSID` for as long as this `Trustee` (and
+    /// anything it's passed to, e.g. an [`ExplicitAccess`] entry given to
+    /// [`build_acl`]) is in use.
+    pub unsafe fn from_sid(sid: *mut core::ffi::c_void, trustee_type: TrusteeType) -> Self {
+        Trustee {
+            multiple_trustee: core::ptr::null_mut(),
+            multiple_trustee_operation: NO_MULTIPLE_TRUSTEE,
+            trustee_form: TrusteeForm::Sid,
+            trustee_type,
+            name: sid.cast(),
+        }
+    }
+}
+
+/// `ACCESS_MODE` — what an [`ExplicitAccess`] entry does to the ACL being
+/// built. Only the four ordinary modes are exposed
+/// (`SET_AUDIT_SUCCESS`/`SET_AUDIT_FAILURE` are SACL/auditing-only,
+/// explicitly out of this module's scope).
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessMode {
+    Grant = 1,
+    Set = 2,
+    Deny = 3,
+    Revoke = 4,
+}
+
+// EXPLICIT_ACCESS_W: `size_of` 48, `Trustee` at offset 16 — verified
+// against mingw-w64's own `aclapi.h` with a compiled `_Static_assert`
+// probe. Genuinely fixed-size, an ordinary FFI-mirror struct with full
+// field access, the same as `Trustee` above.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ExplicitAccess {
+    pub access_permissions: u32,
+    pub access_mode: AccessMode,
+    pub inheritance: u32,
+    pub trustee: Trustee,
+}
+const _: () = assert!(core::mem::size_of::<ExplicitAccess>() == 48);
+const _: () = assert!(core::mem::offset_of!(ExplicitAccess, trustee) == 16);
+
+/// [`build_acl`]'s result — the new `PACL` `SetEntriesInAclW` allocated,
+/// freed via `LocalFree` on `Drop` the same way [`PathSecurityInfo`]
+/// frees its security-descriptor block.
+pub struct BuiltAcl {
+    acl: *mut Acl,
+}
+
+impl BuiltAcl {
+    /// The built ACL, ready to pass to [`set_path_security_info`] (via
+    /// [`PathSecurityInfo::from_raw_parts`]) or [`acl_entries`].
+    pub fn as_ptr(&self) -> *const Acl {
+        self.acl
+    }
+}
+
+impl Drop for BuiltAcl {
+    fn drop(&mut self) {
+        // SAFETY: `self.acl` is the exact `PACL` pointer
+        // `SetEntriesInAclW` allocated for this value and hasn't been
+        // freed yet — freed here exactly once, on this value's only path
+        // to being dropped.
+        let _ = unsafe { LocalFree(self.acl.cast()) };
+    }
+}
+
+/// Build a new ACL from `existing` (if any) plus `entries` —
+/// `SetEntriesInAclW`, the primitive behind `icacls /grant`/`/deny`.
+/// `existing = None` builds a fresh ACL from just `entries`, with
+/// nothing carried over.
+///
+/// Reports failure via its own return value directly — never
+/// `GetLastError` — so a nonzero return is passed straight to
+/// [`crate::error::Win32Error::from_raw`] rather than `Win32Error::last`.
+///
+/// # Safety
+///
+/// `existing`, if `Some`, must be a valid `PACL`. Every [`Trustee`] in
+/// `entries` must carry a still-valid `PSID`/name pointer for the
+/// duration of this call.
+pub unsafe fn build_acl(
+    existing: Option<*const Acl>,
+    entries: &[ExplicitAccess],
+) -> Result<BuiltAcl, crate::error::Win32Error> {
+    let mut new_acl: *mut Acl = core::ptr::null_mut();
+    // SAFETY: `entries` is a valid slice, passed with its own exact
+    // length; `existing` is caller-supplied per this function's own
+    // safety contract, or null (documented as "build from just
+    // `entries`"); `new_acl` is a valid out-pointer.
+    let status = unsafe {
+        SetEntriesInAclW(
+            entries.len() as u32,
+            entries.as_ptr(),
+            existing.unwrap_or(core::ptr::null()),
+            &mut new_acl,
+        )
+    };
+    if status != 0 {
+        return Err(crate::error::Win32Error::from_raw(status));
+    }
+    Ok(BuiltAcl { acl: new_acl })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,6 +674,50 @@ mod tests {
                 );
             }
         }
+
+        std::fs::remove_file(&path).expect("removing the test file should succeed");
+    }
+
+    #[test]
+    fn build_acl_produces_an_acl_with_the_requested_grant_entry() {
+        let path = std::env::temp_dir().join("rusty_win32_security_test_build_acl.txt");
+        std::fs::write(&path, b"hello").expect("creating the test file should succeed");
+        let path_str = path.to_str().expect("temp path should be valid UTF-8");
+
+        // No `well_known_sid`/`ConvertStringSidToSidW` yet (later round-2
+        // items) to construct a fresh SID from scratch — this file's own
+        // owner is a real, already-obtained SID good enough to build a
+        // self-contained test around.
+        let info = path_security_info(path_str, OWNER_SECURITY_INFORMATION)
+            .expect("GetNamedSecurityInfoW should succeed for a real file");
+        let owner = info.owner().expect("a real file should have an owner SID");
+
+        const GENERIC_READ: u32 = 0x8000_0000;
+        let entry = ExplicitAccess {
+            access_permissions: GENERIC_READ,
+            access_mode: AccessMode::Grant,
+            inheritance: 0,
+            // SAFETY: `owner` is a valid `PSID` from `info`, which stays
+            // alive (not yet dropped) for this whole test.
+            trustee: unsafe { Trustee::from_sid(owner, TrusteeType::User) },
+        };
+
+        // SAFETY: `entries` (just built above) carries a still-valid
+        // `PSID` pointer; `existing` is `None`.
+        let built = unsafe { build_acl(None, &[entry]) }
+            .expect("SetEntriesInAclW should succeed building a fresh ACL");
+
+        // SAFETY: `built` is still alive (not yet dropped), so its ACL
+        // pointer is still valid.
+        let acl_entries_found = unsafe { acl_entries(built.as_ptr()) }
+            .expect("GetAclInformation/GetAce should succeed");
+        assert_eq!(
+            acl_entries_found.len(),
+            1,
+            "a fresh ACL built from exactly one entry should have exactly one ACE"
+        );
+        assert_eq!(acl_entries_found[0].kind, AceKind::Allow);
+        assert_eq!(acl_entries_found[0].mask, GENERIC_READ);
 
         std::fs::remove_file(&path).expect("removing the test file should succeed");
     }

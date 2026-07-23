@@ -6,6 +6,26 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #227 — security: add build_acl
+**2026-07-23** · [#227](https://github.com/baileyrd/rusty_win32/pull/227)
+
+- **Added:** `security::build_acl` (`SetEntriesInAclW`) plus
+  `ExplicitAccess`/`Trustee`/`AccessMode`/`TrusteeForm`/`TrusteeType` and
+  a new `BuiltAcl` result type, closing issue #156 — build a new ACL
+  from an existing one (or from scratch) plus add/replace/remove
+  entries, the primitive behind `icacls /grant`/`/deny`. Unlike
+  `Acl`/`PSID`, `Trustee`/`ExplicitAccess` are genuinely fixed-size and
+  get ordinary, fully-fielded FFI-mirror structs (verified against
+  mingw-w64's real `aclapi.h` with a compiled `_Static_assert` probe),
+  per `gap-analysis.md`'s design notes for this module. `BuiltAcl` frees
+  its `PACL` via `LocalFree` on `Drop`, the same pattern
+  `PathSecurityInfo` already uses. `Trustee::from_sid` is the only
+  constructor for now — the primitives that would normally build one
+  from a name or well-known identity
+  (`BuildTrusteeWithSidW`/`CreateWellKnownSid`) are later round-2 items
+  this crate doesn't have yet; tested by granting access to a real
+  file's own already-obtained owner SID.
+
 ## PR #226 — security: add acl_entries
 **2026-07-23** · [#226](https://github.com/baileyrd/rusty_win32/pull/226)
 
