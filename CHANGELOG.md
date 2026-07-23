@@ -58,6 +58,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `job::is_in_job` (`IsProcessInJob`), checking job membership before
   `assign` to avoid a surprise failure under an ambient job (e.g. GitHub
   Actions' Windows runners) — another parity-loop find.
+- `console::title`/`console::set_title`
+  (`GetConsoleTitleW`/`SetConsoleTitleW`), the Windows analog of xterm's OSC
+  title-setting escape sequence — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).

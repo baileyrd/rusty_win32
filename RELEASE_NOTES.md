@@ -6,6 +6,19 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #95 — console: add title/set_title (GetConsoleTitleW/SetConsoleTitleW)
+**2026-07-23** · [#95](https://github.com/baileyrd/rusty_win32/pull/95)
+
+- **Added:** `console::title`/`console::set_title`
+  (`GetConsoleTitleW`/`SetConsoleTitleW`), closing issue #62 from the
+  parity-loop sweep — the Windows analog of xterm's OSC title-setting
+  escape sequence, a common shell feature (showing cwd/running command in
+  the window title) this crate had no primitive for at all before this.
+  `title` reports an empty string, not an error, for a console with no
+  title set, handling the same "zero return means either buffer-too-small
+  or empty" quirk `process::get_env_var` already handles for
+  `GetEnvironmentVariableW`.
+
 ## PR #94 — job: add is_in_job (IsProcessInJob)
 **2026-07-23** · [#94](https://github.com/baileyrd/rusty_win32/pull/94)
 
