@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #203 — pipe: add transact/call (TransactNamedPipe/CallNamedPipeW)
+**2026-07-23** · [#203](https://github.com/baileyrd/rusty_win32/pull/203)
+
+- **Added:** `pipe::transact`/`pipe::call` (`TransactNamedPipe`/
+  `CallNamedPipeW`), closing issue #132 — one-shot message-mode pipe
+  transactions (write-then-read in a single call) for a simple
+  request-response protocol; `call` additionally combines
+  `wait_for_server`/`open_client`/`transact`/close for a caller that only
+  needs one round trip. Another round-2 "weak/no clear consumer" item
+  (`gap-analysis.md`); no current `rush` feature asks for this.
+
 ## PR #202 — pipe: add pipe_info (GetNamedPipeInfo)
 **2026-07-23** · [#202](https://github.com/baileyrd/rusty_win32/pull/202)
 

@@ -104,6 +104,24 @@ unsafe extern "system" {
         flags_and_attributes: u32,
         template_file: RawHandle,
     ) -> RawHandle;
+    fn TransactNamedPipe(
+        named_pipe: RawHandle,
+        in_buffer: *const u8,
+        in_buffer_size: u32,
+        out_buffer: *mut u8,
+        out_buffer_size: u32,
+        bytes_read: *mut u32,
+        overlapped: *mut core::ffi::c_void,
+    ) -> i32;
+    fn CallNamedPipeW(
+        name: *const u16,
+        in_buffer: *const u8,
+        in_buffer_size: u32,
+        out_buffer: *mut u8,
+        out_buffer_size: u32,
+        bytes_read: *mut u32,
+        timeout_ms: u32,
+    ) -> i32;
 }
 
 /// Build the full `\\.\pipe\<name>` UTF-16, NUL-terminated pipe path every
@@ -355,6 +373,79 @@ pub unsafe fn pipe_info(pipe: RawHandle) -> Result<PipeInfo, Win32Error> {
     })
 }
 
+/// One-shot write-then-read transaction on an already-connected,
+/// message-mode pipe — `TransactNamedPipe`, an alternative to separate
+/// write/read calls for a simple request-response protocol. Only valid on
+/// a duplex, message-type pipe (`PIPE_ACCESS_DUPLEX` and
+/// `PIPE_TYPE_MESSAGE`); a byte-mode or inbound/outbound-only pipe fails
+/// this call, per its own documented contract. Returns the number of
+/// bytes actually written into `read_buf`.
+///
+/// # Safety
+///
+/// `pipe` must be a currently-open, valid named-pipe handle.
+pub unsafe fn transact(
+    pipe: RawHandle,
+    write_buf: &[u8],
+    read_buf: &mut [u8],
+) -> Result<usize, Win32Error> {
+    let mut bytes_read: u32 = 0;
+    // SAFETY: `pipe` is caller-supplied per this function's own safety
+    // contract; `write_buf`/`read_buf` are valid slices matched by the
+    // `..._size` arguments naming their exact lengths; `overlapped = NULL`
+    // requests synchronous operation, matching this crate's existing
+    // no-overlapped-I/O convention; `bytes_read` is a valid out-pointer.
+    let ok = unsafe {
+        TransactNamedPipe(
+            pipe,
+            write_buf.as_ptr(),
+            write_buf.len() as u32,
+            read_buf.as_mut_ptr(),
+            read_buf.len() as u32,
+            &mut bytes_read,
+            core::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(Win32Error::last());
+    }
+    Ok(bytes_read as usize)
+}
+
+/// A one-shot client-side request-response call against the named pipe
+/// `name` — `CallNamedPipeW`. Combines [`wait_for_server`]/[`open_client`]/
+/// [`transact`]/close into a single call, for a caller that only needs one
+/// round trip and doesn't want to keep the pipe open afterward. Returns
+/// the number of bytes actually written into `read_buf`.
+pub fn call(
+    name: &str,
+    write_buf: &[u8],
+    read_buf: &mut [u8],
+    timeout_ms: u32,
+) -> Result<usize, Win32Error> {
+    let full_name = full_pipe_name(name);
+    let mut bytes_read: u32 = 0;
+    // SAFETY: `full_name` is a valid, NUL-terminated UTF-16 string;
+    // `write_buf`/`read_buf` are valid slices matched by the `..._size`
+    // arguments naming their exact lengths; `bytes_read` is a valid
+    // out-pointer.
+    let ok = unsafe {
+        CallNamedPipeW(
+            full_name.as_ptr(),
+            write_buf.as_ptr(),
+            write_buf.len() as u32,
+            read_buf.as_mut_ptr(),
+            read_buf.len() as u32,
+            &mut bytes_read,
+            timeout_ms,
+        )
+    };
+    if ok == 0 {
+        return Err(Win32Error::last());
+    }
+    Ok(bytes_read as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,6 +497,104 @@ mod tests {
         let mut buf = [0u8; 32];
         let n = server_file.read(&mut buf).unwrap();
         assert_eq!(&buf[..n], b"rusty_win32");
+    }
+
+    #[test]
+    fn transact_writes_and_reads_a_response_in_one_call() {
+        let name = "rusty_win32_test_pipe_transact";
+        let server = create_server(
+            name,
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            1,
+            512,
+            512,
+        )
+        .expect("CreateNamedPipeW should succeed");
+
+        let client_thread = std::thread::spawn(move || {
+            wait_for_server(name, 5_000).expect("WaitNamedPipeW should succeed");
+            let client = open_client(name, GENERIC_READ | GENERIC_WRITE)
+                .expect("CreateFileW should succeed");
+            let mut response = [0u8; 4];
+            // SAFETY: `client` is a freshly opened, valid, message-mode
+            // duplex named-pipe handle; this is the operation under test.
+            let bytes_read = unsafe { transact(client, b"ping", &mut response) }
+                .expect("TransactNamedPipe should succeed");
+            (client as usize, bytes_read, response)
+        });
+
+        // SAFETY: `server` is freshly created via `create_server` above,
+        // not yet connected.
+        unsafe { connect_server(server) }.expect("ConnectNamedPipeW should succeed");
+
+        // SAFETY: `server` is freshly created, valid, and uniquely owned
+        // here — nothing else holds or will close it.
+        let mut server_file =
+            std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(server as _) });
+        let mut request = [0u8; 4];
+        server_file
+            .read_exact(&mut request)
+            .expect("reading the client's request should succeed");
+        assert_eq!(&request, b"ping");
+        server_file
+            .write_all(b"pong")
+            .expect("writing the response should succeed");
+
+        let (client, bytes_read, response) = client_thread
+            .join()
+            .expect("client thread should not panic");
+        assert_eq!(bytes_read, 4);
+        assert_eq!(&response, b"pong");
+
+        // SAFETY: `client` is still a valid, currently-open handle, closed
+        // exactly once and not used again after this.
+        unsafe { crate::handle::close(client as RawHandle).unwrap() };
+    }
+
+    #[test]
+    fn call_completes_a_request_response_round_trip_without_a_kept_open_handle() {
+        let name = "rusty_win32_test_pipe_call";
+        let server = create_server(
+            name,
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            1,
+            512,
+            512,
+        )
+        .expect("CreateNamedPipeW should succeed");
+
+        let client_thread = std::thread::spawn(move || {
+            let mut response = [0u8; 4];
+            let bytes_read =
+                call(name, b"ping", &mut response, 5_000).expect("CallNamedPipeW should succeed");
+            (bytes_read, response)
+        });
+
+        // SAFETY: `server` is freshly created via `create_server` above,
+        // not yet connected. `CallNamedPipeW` itself calls `WaitNamedPipeW`
+        // internally, so no separate wait is needed on the client side.
+        unsafe { connect_server(server) }.expect("ConnectNamedPipeW should succeed");
+
+        // SAFETY: `server` is freshly created, valid, and uniquely owned
+        // here — nothing else holds or will close it.
+        let mut server_file =
+            std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(server as _) });
+        let mut request = [0u8; 4];
+        server_file
+            .read_exact(&mut request)
+            .expect("reading the client's request should succeed");
+        assert_eq!(&request, b"ping");
+        server_file
+            .write_all(b"pong")
+            .expect("writing the response should succeed");
+
+        let (bytes_read, response) = client_thread
+            .join()
+            .expect("client thread should not panic");
+        assert_eq!(bytes_read, 4);
+        assert_eq!(&response, b"pong");
     }
 
     #[test]
