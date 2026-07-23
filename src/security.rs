@@ -77,6 +77,19 @@ unsafe extern "system" {
     ) -> i32;
     fn ConvertSidToStringSidW(sid: *mut core::ffi::c_void, string_sid: *mut *mut u16) -> i32;
     fn ConvertStringSidToSidW(string_sid: *const u16, sid: *mut *mut core::ffi::c_void) -> i32;
+    fn InitializeAcl(acl: *mut Acl, acl_length: u32, acl_revision: u32) -> i32;
+    fn AddAccessAllowedAce(
+        acl: *mut Acl,
+        ace_revision: u32,
+        access_mask: u32,
+        sid: *mut core::ffi::c_void,
+    ) -> i32;
+    fn AddAccessDeniedAce(
+        acl: *mut Acl,
+        ace_revision: u32,
+        access_mask: u32,
+        sid: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -901,6 +914,84 @@ pub fn string_to_sid(s: &str) -> Result<ConvertedSid, crate::error::Win32Error> 
     Ok(ConvertedSid { sid })
 }
 
+/// `ACL_REVISION` — the only ACL revision [`initialize_acl`]/
+/// [`add_access_allowed_ace`]/[`add_access_denied_ace`] produce
+/// (`ACL_REVISION_DS`, needed only for object-specific ACEs, is out of
+/// this module's scope). Verified against mingw-w64's own `winnt.h` with
+/// a compiled `_Static_assert` probe.
+const ACL_REVISION: u32 = 2;
+
+/// Initialize `buf` in place as a fresh, empty ACL header —
+/// `InitializeAcl`, the per-ACE lower-level alternative to [`build_acl`]'s
+/// all-at-once `SetEntriesInAclW`, useful for a brand-new object's initial
+/// ACL. On success, `buf.as_mut_ptr()` reinterpreted as `*mut Acl` is a
+/// valid (empty) `PACL` — pass it to [`add_access_allowed_ace`]/
+/// [`add_access_denied_ace`] to add entries, or to [`acl_entries`]/
+/// [`set_path_security_info`] as-is.
+///
+/// `buf` must be at least `size_of::<Acl>()` (8) bytes, with any
+/// remaining space left for ACEs added afterward — an undersized `buf`
+/// surfaces as an ordinary `Err` from `InitializeAcl` itself rather than
+/// a separate check here. No particular alignment of `buf` is required:
+/// this crate never reads an `Acl`'s fields directly, always through
+/// `GetAclInformation`/`GetAce`, which take it as an opaque pointer.
+pub fn initialize_acl(buf: &mut [u8]) -> Result<(), crate::error::Win32Error> {
+    // SAFETY: `buf` is a valid, writable buffer of exactly `buf.len()`
+    // bytes; `InitializeAcl` only ever writes within that length.
+    let ok = unsafe { InitializeAcl(buf.as_mut_ptr().cast(), buf.len() as u32, ACL_REVISION) };
+    if ok == 0 {
+        Err(crate::error::Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
+/// Append an allow-access ACE naming `sid` to `acl` — `AddAccessAllowedAce`,
+/// the per-ACE alternative to [`build_acl`]'s all-at-once `SetEntriesInAclW`.
+///
+/// # Safety
+///
+/// `acl` must be a valid `PACL` — e.g. one just initialized via
+/// [`initialize_acl`] — with enough free space for one more
+/// `ACCESS_ALLOWED_ACE` sized for `sid`. `sid` must be a valid `PSID` for
+/// the duration of this call (its bytes are copied into `acl`, so it need
+/// not outlive the call itself).
+pub unsafe fn add_access_allowed_ace(
+    acl: *mut Acl,
+    sid: *mut core::ffi::c_void,
+    mask: u32,
+) -> Result<(), crate::error::Win32Error> {
+    // SAFETY: `acl`/`sid` are caller-supplied per this function's own
+    // safety contract.
+    let ok = unsafe { AddAccessAllowedAce(acl, ACL_REVISION, mask, sid) };
+    if ok == 0 {
+        Err(crate::error::Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
+/// Append a deny-access ACE naming `sid` to `acl` — `AddAccessDeniedAce`,
+/// the deny counterpart to [`add_access_allowed_ace`].
+///
+/// # Safety
+///
+/// Same contract as [`add_access_allowed_ace`].
+pub unsafe fn add_access_denied_ace(
+    acl: *mut Acl,
+    sid: *mut core::ffi::c_void,
+    mask: u32,
+) -> Result<(), crate::error::Win32Error> {
+    // SAFETY: `acl`/`sid` are caller-supplied per this function's own
+    // safety contract.
+    let ok = unsafe { AddAccessDeniedAce(acl, ACL_REVISION, mask, sid) };
+    if ok == 0 {
+        Err(crate::error::Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1173,5 +1264,84 @@ mod tests {
         let err = string_to_sid("not a valid sid string")
             .expect_err("ConvertStringSidToSidW should fail on malformed input");
         assert_eq!(err, crate::error::Win32Error::ERROR_INVALID_SID);
+    }
+
+    #[test]
+    fn initialize_acl_then_add_access_allowed_ace_produces_a_single_ace() {
+        let path = std::env::temp_dir().join("rusty_win32_security_test_init_acl_allow.txt");
+        std::fs::write(&path, b"hello").expect("creating the test file should succeed");
+        let path_str = path.to_str().expect("temp path should be valid UTF-8");
+
+        let info = path_security_info(path_str, OWNER_SECURITY_INFORMATION)
+            .expect("GetNamedSecurityInfoW should succeed for a real file");
+        let owner = info.owner().expect("a real file should have an owner SID");
+
+        let mut buf = alloc::vec![0u8; 256];
+        initialize_acl(&mut buf).expect("InitializeAcl should succeed for a well-sized buffer");
+        let acl: *mut Acl = buf.as_mut_ptr().cast();
+
+        const GENERIC_READ: u32 = 0x8000_0000;
+        // SAFETY: `acl` was just initialized above with plenty of free
+        // space; `owner` is a valid `PSID` from `info`, which stays alive
+        // (not yet dropped) for this whole test.
+        unsafe { add_access_allowed_ace(acl, owner, GENERIC_READ) }
+            .expect("AddAccessAllowedAce should succeed");
+
+        // SAFETY: `acl` is still alive (`buf` hasn't been dropped/moved).
+        let entries = unsafe { acl_entries(acl.cast_const()) }
+            .expect("GetAclInformation/GetAce should succeed");
+        assert_eq!(
+            entries.len(),
+            1,
+            "an ACL initialized from scratch with exactly one added ACE should have exactly one"
+        );
+        assert_eq!(entries[0].kind, AceKind::Allow);
+        assert_eq!(entries[0].mask, GENERIC_READ);
+
+        std::fs::remove_file(&path).expect("removing the test file should succeed");
+    }
+
+    #[test]
+    fn add_access_denied_ace_appends_a_second_ace_after_an_allowed_one() {
+        let path = std::env::temp_dir().join("rusty_win32_security_test_init_acl_deny.txt");
+        std::fs::write(&path, b"hello").expect("creating the test file should succeed");
+        let path_str = path.to_str().expect("temp path should be valid UTF-8");
+
+        let info = path_security_info(path_str, OWNER_SECURITY_INFORMATION)
+            .expect("GetNamedSecurityInfoW should succeed for a real file");
+        let owner = info.owner().expect("a real file should have an owner SID");
+
+        let mut buf = alloc::vec![0u8; 256];
+        initialize_acl(&mut buf).expect("InitializeAcl should succeed for a well-sized buffer");
+        let acl: *mut Acl = buf.as_mut_ptr().cast();
+
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        // SAFETY: `acl` was just initialized above with plenty of free
+        // space; `owner` is a valid `PSID` from `info`, which stays alive
+        // (not yet dropped) for this whole test.
+        unsafe { add_access_allowed_ace(acl, owner, GENERIC_READ) }
+            .expect("AddAccessAllowedAce should succeed");
+        unsafe { add_access_denied_ace(acl, owner, GENERIC_WRITE) }
+            .expect("AddAccessDeniedAce should succeed");
+
+        // SAFETY: `acl` is still alive (`buf` hasn't been dropped/moved).
+        let entries = unsafe { acl_entries(acl.cast_const()) }
+            .expect("GetAclInformation/GetAce should succeed");
+        assert_eq!(entries.len(), 2, "both added ACEs should be reported");
+        assert_eq!(entries[0].kind, AceKind::Allow);
+        assert_eq!(entries[0].mask, GENERIC_READ);
+        assert_eq!(entries[1].kind, AceKind::Deny);
+        assert_eq!(entries[1].mask, GENERIC_WRITE);
+
+        std::fs::remove_file(&path).expect("removing the test file should succeed");
+    }
+
+    #[test]
+    fn initialize_acl_fails_for_an_undersized_buffer() {
+        let mut buf = [0u8; 1];
+        let err = initialize_acl(&mut buf)
+            .expect_err("InitializeAcl should fail for a buffer smaller than a minimal ACL");
+        assert_eq!(err, crate::error::Win32Error::ERROR_INVALID_PARAMETER);
     }
 }
