@@ -75,6 +75,7 @@ unsafe extern "system" {
         number_of_attrs_written: *mut u32,
     ) -> i32;
     fn FlushConsoleInputBuffer(console_input: RawHandle) -> i32;
+    fn GetNumberOfConsoleInputEvents(console_input: RawHandle, number_of_events: *mut u32) -> i32;
     fn WaitForSingleObject(handle: RawHandle, milliseconds: u32) -> u32;
     fn WriteConsoleInputW(
         console_input: RawHandle,
@@ -650,6 +651,28 @@ pub unsafe fn flush_input(console_input: RawHandle) -> Result<(), Win32Error> {
     }
 }
 
+/// How many input events are currently queued on `console_input`, without
+/// consuming any of them — `GetNumberOfConsoleInputEvents`, the console-input
+/// analog of [`crate::handle::pipe_bytes_available`]'s non-blocking "how
+/// much is ready" check for pipes. Unlike [`wait_readable`], which can only
+/// answer "is at least one event ready" (and, for a nonzero timeout,
+/// blocks), this is an instantaneous depth check.
+///
+/// # Safety
+///
+/// `console_input` must be a currently-open, valid console input handle.
+pub unsafe fn pending_input_events(console_input: RawHandle) -> Result<u32, Win32Error> {
+    let mut count: u32 = 0;
+    // SAFETY: `console_input` is caller-supplied per this function's own
+    // safety contract; `count` is a valid out-pointer.
+    let ok = unsafe { GetNumberOfConsoleInputEvents(console_input, &mut count) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(count)
+    }
+}
+
 /// Synthesize `text` as a sequence of real console key events —
 /// `WriteConsoleInputW`, the standard, documented technique console
 /// automation tools use to inject keystrokes (queues `INPUT_RECORD`s into
@@ -1023,6 +1046,34 @@ mod tests {
             !ready_after,
             "flushing should discard the queued keystrokes"
         );
+    }
+
+    #[test]
+    fn pending_input_events_reports_the_queued_count() {
+        let stdin = ensure_console_stdin();
+        // SAFETY: `stdin` is a real, valid console input handle; this
+        // clears out anything a prior test in the same process left queued.
+        unsafe { flush_input(stdin) }.expect("FlushConsoleInputBuffer should succeed");
+
+        // SAFETY: same handle.
+        let before = unsafe { pending_input_events(stdin) }
+            .expect("GetNumberOfConsoleInputEvents should succeed");
+        assert_eq!(before, 0, "a freshly flushed input buffer should be empty");
+
+        // SAFETY: same handle.
+        let written =
+            unsafe { write_char_events(stdin, "a") }.expect("WriteConsoleInputW should succeed");
+
+        // SAFETY: same handle.
+        let after = unsafe { pending_input_events(stdin) }
+            .expect("GetNumberOfConsoleInputEvents should succeed");
+        assert_eq!(
+            after, written,
+            "queued count should match what was just written"
+        );
+
+        // SAFETY: same handle; leave the input buffer clean for other tests.
+        unsafe { flush_input(stdin) }.expect("FlushConsoleInputBuffer should succeed");
     }
 
     #[test]

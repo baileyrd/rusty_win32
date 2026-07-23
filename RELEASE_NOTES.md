@@ -6,6 +6,17 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #99 — console: add pending_input_events (GetNumberOfConsoleInputEvents)
+**2026-07-23** · [#99](https://github.com/baileyrd/rusty_win32/pull/99)
+
+- **Added:** `console::pending_input_events`
+  (`GetNumberOfConsoleInputEvents`), closing issue #66 from the parity-loop
+  sweep — a non-blocking "how many events are queued" check for console
+  input, the console-input analog of `handle::pipe_bytes_available`
+  (`PeekNamedPipe`) for pipes. `wait_readable` can only answer "is at least
+  one event ready" (and blocks for a nonzero timeout); this is an
+  instantaneous depth check.
+
 ## PR #98 — console: add flush_input (FlushConsoleInputBuffer)
 **2026-07-23** · [#98](https://github.com/baileyrd/rusty_win32/pull/98)
 

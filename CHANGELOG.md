@@ -68,6 +68,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   clear-to-end-of-line-style redraw primitive — another parity-loop find.
 - `console::flush_input` (`FlushConsoleInputBuffer`), discarding stale
   queued keystrokes (e.g. after Ctrl-C) — another parity-loop find.
+- `console::pending_input_events` (`GetNumberOfConsoleInputEvents`), a
+  non-blocking queued-input-depth check — another parity-loop find.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
