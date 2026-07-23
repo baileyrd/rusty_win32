@@ -105,6 +105,10 @@ unsafe extern "system" {
     fn SleepEx(milliseconds: u32, alertable: i32) -> u32;
     fn GetSystemInfo(system_info: *mut SystemInfo);
     fn GetTickCount64() -> u64;
+    fn GetLogicalProcessorInformation(
+        buffer: *mut SystemLogicalProcessorInformationRaw,
+        return_length: *mut u32,
+    ) -> i32;
     fn GetComputerNameW(buffer: *mut u16, size: *mut u32) -> i32;
     fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
     fn SetErrorMode(mode: u32) -> u32;
@@ -296,6 +300,27 @@ const _: () = assert!(core::mem::offset_of!(SystemInfo, processor_type) == 36);
 const _: () = assert!(core::mem::offset_of!(SystemInfo, allocation_granularity) == 40);
 const _: () = assert!(core::mem::offset_of!(SystemInfo, processor_level) == 44);
 const _: () = assert!(core::mem::offset_of!(SystemInfo, processor_revision) == 46);
+
+// SYSTEM_LOGICAL_PROCESSOR_INFORMATION: `size_of` 32, `align_of` 8 on
+// x86_64. Verified against mingw-w64's `winnt.h` the same way as this
+// crate's other structs (a `_Static_assert` probe compiled with
+// `x86_64-w64-mingw32-gcc` against the real header). The real struct's
+// trailing member is a union (`ProcessorCore.Flags`/`NumaNode.NodeNumber`/
+// `Cache: CACHE_DESCRIPTOR`/`Reserved: [u64; 2]`) — this crate only
+// exposes `ProcessorMask`/`Relationship`, the two fields meaningful across
+// every relationship kind, so the union is mirrored as opaque padding
+// bytes rather than a Rust `union` this crate has no other use for yet.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct SystemLogicalProcessorInformationRaw {
+    processor_mask: usize,
+    relationship: u32,
+    _union: [u8; 20],
+}
+const _: () = assert!(core::mem::size_of::<SystemLogicalProcessorInformationRaw>() == 32);
+const _: () = assert!(core::mem::align_of::<SystemLogicalProcessorInformationRaw>() == 8);
+const _: () =
+    assert!(core::mem::offset_of!(SystemLogicalProcessorInformationRaw, relationship) == 8);
 
 // MEMORYSTATUSEX: `size_of` 64, `align_of` 8 on x86_64. Verified against
 // mingw-w64's `sysinfoapi.h`/`winbase.h` the same way as this crate's other
@@ -1148,6 +1173,95 @@ pub fn tick_count() -> u64 {
     unsafe { GetTickCount64() }
 }
 
+/// `SYSTEM_LOGICAL_PROCESSOR_INFORMATION`'s `Relationship` field — what
+/// kind of CPU topology relationship a given
+/// [`LogicalProcessorInformation`] entry describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessorRelationship {
+    /// The entry describes a single physical processor core (and its set
+    /// of logical processors, e.g. via hyperthreading).
+    ProcessorCore,
+    /// The entry describes a NUMA node.
+    NumaNode,
+    /// The entry describes a cache (L1/L2/L3) shared by the processors in
+    /// its mask.
+    Cache,
+    /// The entry describes a physical processor package (a socket).
+    ProcessorPackage,
+    /// A relationship kind this crate doesn't otherwise name, carrying the
+    /// raw `Relationship` value Windows reported.
+    Unknown(u32),
+}
+
+impl ProcessorRelationship {
+    fn from_raw(raw: u32) -> Self {
+        match raw {
+            0 => Self::ProcessorCore,
+            1 => Self::NumaNode,
+            2 => Self::Cache,
+            3 => Self::ProcessorPackage,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+/// One [`logical_processor_information`] entry — a set of logical
+/// processors (`processor_mask`, the same per-bit-a-CPU shape as
+/// [`SystemInfo`]'s `active_processor_mask`) sharing a given topology
+/// relationship.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogicalProcessorInformation {
+    /// Which logical processors (bit N = CPU N) this entry covers.
+    pub processor_mask: usize,
+    /// What kind of relationship this entry describes.
+    pub relationship: ProcessorRelationship,
+}
+
+/// Detailed CPU topology (cores/logical processors/NUMA nodes/cache
+/// layout) — `GetLogicalProcessorInformation`, going beyond
+/// [`logical_processor_count`]'s single number. Cache- and NUMA-specific
+/// fields (cache size/line size/associativity, NUMA node number) aren't
+/// exposed — only `processor_mask`/`relationship`, meaningful across
+/// every relationship kind; a future consumer needing those can extend
+/// this. No current `rush` feature asks for this; filed for Win32 parity.
+pub fn logical_processor_information() -> Result<Vec<LogicalProcessorInformation>, Win32Error> {
+    let mut return_length: u32 = 0;
+    // SAFETY: a NULL buffer with `return_length = 0` is the documented way
+    // to query the required buffer size; the real answer comes back via
+    // `return_length` on the expected `ERROR_INSUFFICIENT_BUFFER` failure.
+    let ok = unsafe { GetLogicalProcessorInformation(core::ptr::null_mut(), &mut return_length) };
+    if ok != 0 {
+        // A real machine always has at least one entry; a `0`-size
+        // success is surprising but not a failure this wrapper invents —
+        // report it as an empty result rather than erroring.
+        return Ok(Vec::new());
+    }
+    let err = Win32Error::last();
+    if err != Win32Error::ERROR_INSUFFICIENT_BUFFER {
+        return Err(err);
+    }
+
+    let count =
+        return_length as usize / core::mem::size_of::<SystemLogicalProcessorInformationRaw>();
+    let mut buf = alloc::vec![SystemLogicalProcessorInformationRaw::default(); count];
+    let mut actual_length = return_length;
+    // SAFETY: `buf` is a valid, correctly-sized (per the size this same
+    // call just reported) writable buffer of
+    // `SystemLogicalProcessorInformationRaw`; `actual_length` is a valid
+    // in/out pointer set to that buffer's byte length.
+    let ok = unsafe { GetLogicalProcessorInformation(buf.as_mut_ptr(), &mut actual_length) };
+    if ok == 0 {
+        return Err(Win32Error::last());
+    }
+    Ok(buf
+        .iter()
+        .map(|raw| LogicalProcessorInformation {
+            processor_mask: raw.processor_mask,
+            relationship: ProcessorRelationship::from_raw(raw.relationship),
+        })
+        .collect())
+}
+
 /// This machine's NetBIOS computer name — `GetComputerNameW`, the primitive
 /// behind `$HOSTNAME`, a shell prompt, or a `hostname` builtin.
 pub fn computer_name() -> Result<alloc::string::String, Win32Error> {
@@ -1879,6 +1993,28 @@ mod tests {
             after > before,
             "GetTickCount64 should have advanced after a real sleep"
         );
+    }
+
+    #[test]
+    fn logical_processor_information_reports_at_least_one_processor_core_entry() {
+        let entries =
+            logical_processor_information().expect("GetLogicalProcessorInformation should succeed");
+        assert!(
+            !entries.is_empty(),
+            "a real machine should report at least one topology entry"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.relationship == ProcessorRelationship::ProcessorCore),
+            "a real machine should report at least one ProcessorCore entry, got: {entries:?}"
+        );
+        for entry in &entries {
+            assert_ne!(
+                entry.processor_mask, 0,
+                "every entry's processor mask should cover at least one CPU"
+            );
+        }
     }
 
     #[test]

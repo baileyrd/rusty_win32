@@ -179,6 +179,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   (`GetSystemDirectoryW`/`GetWindowsDirectoryW`), standard
   well-known-location primitives (`C:\Windows\System32`/`C:\Windows`) —
   another round-2 item.
+- `process::logical_processor_information` (`GetLogicalProcessorInformation`)
+  plus `LogicalProcessorInformation`/`ProcessorRelationship`, detailed CPU
+  topology beyond `process::logical_processor_count`'s single number —
+  another round-2 item.
 ### Changed
 - `process::spawn_suspended` takes a new `new_process_group: bool` parameter
   (breaking, pre-1.0).
