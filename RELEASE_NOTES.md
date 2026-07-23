@@ -6,6 +6,16 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #112 — fs: add create_hard_link (CreateHardLinkW)
+**2026-07-23** · [#112](https://github.com/baileyrd/rusty_win32/pull/112)
+
+- **Added:** `fs::create_hard_link` (`CreateHardLinkW`), closing issue #79
+  from the parity-loop sweep — `ln`'s (without `-s`) Windows counterpart,
+  the non-symbolic counterpart to `create_symlink` (issue #18). Both paths
+  must be on the same volume and `target_path` must already exist, a
+  documented `CreateHardLinkW` restriction this wrapper doesn't check
+  itself.
+
 ## PR #111 — fs: add create_directory/remove_directory (CreateDirectoryW/RemoveDirectoryW)
 **2026-07-23** · [#111](https://github.com/baileyrd/rusty_win32/pull/111)
 

@@ -209,6 +209,11 @@ unsafe extern "system" {
         target_file_name: *const u16,
         flags: u32,
     ) -> u8;
+    fn CreateHardLinkW(
+        file_name: *const u16,
+        existing_file_name: *const u16,
+        security_attributes: *const core::ffi::c_void,
+    ) -> i32;
     fn GetFinalPathNameByHandleW(
         file: RawHandle,
         file_path: *mut u16,
@@ -520,6 +525,35 @@ pub fn create_symlink(
     // SAFETY: `link_wide`/`target_wide` are valid, NUL-terminated UTF-16
     // strings; `flags` is a plain bitmask, not a pointer.
     let ok = unsafe { CreateSymbolicLinkW(link_wide.as_ptr(), target_wide.as_ptr(), flags) };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(())
+    }
+}
+
+/// Create a hard link at `link_path` pointing at the same file content as
+/// `target_path` — `CreateHardLinkW`, `ln`'s (without `-s`) Windows
+/// counterpart, the non-symbolic counterpart to [`create_symlink`]. Unlike
+/// a symlink, a hard link is indistinguishable from the original file
+/// (both names refer to the same underlying data); `target_path` must
+/// already exist and both paths must be on the same volume — a
+/// documented `CreateHardLinkW` restriction, not something this wrapper
+/// checks itself.
+pub fn create_hard_link(link_path: &str, target_path: &str) -> Result<(), Win32Error> {
+    let link_wide: Vec<u16> = link_path
+        .encode_utf16()
+        .chain(core::iter::once(0))
+        .collect();
+    let target_wide: Vec<u16> = target_path
+        .encode_utf16()
+        .chain(core::iter::once(0))
+        .collect();
+    // SAFETY: `link_wide`/`target_wide` are valid, NUL-terminated UTF-16
+    // strings; `security_attributes = NULL` requests default security
+    // attributes, a documented valid input.
+    let ok =
+        unsafe { CreateHardLinkW(link_wide.as_ptr(), target_wide.as_ptr(), core::ptr::null()) };
     if ok == 0 {
         Err(Win32Error::last())
     } else {
@@ -1065,6 +1099,51 @@ mod tests {
 
         let err = create_directory(dir.to_str().unwrap()).unwrap_err();
         assert_eq!(err, Win32Error::ERROR_ALREADY_EXISTS);
+
+        std::fs::remove_dir_all(&dir).expect("cleaning up the test directory should succeed");
+    }
+
+    #[test]
+    fn create_hard_link_shares_content_and_increases_link_count() {
+        use std::os::windows::io::AsRawHandle;
+
+        let dir = std::env::temp_dir().join("rusty_win32_hard_link_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).expect("creating the test directory should succeed");
+        let target = dir.join("target.txt");
+        let link = dir.join("link.txt");
+        std::fs::write(&target, b"shared content").expect("writing the target file should succeed");
+
+        create_hard_link(link.to_str().unwrap(), target.to_str().unwrap())
+            .expect("CreateHardLinkW should succeed");
+
+        let via_link = std::fs::read(&link).expect("reading through the hard link should succeed");
+        assert_eq!(via_link, b"shared content");
+
+        let file = std::fs::File::open(&target).expect("opening the target file should succeed");
+        // SAFETY: `file`'s raw handle is a currently-open, valid handle to
+        // a real file, owned by `file` for the duration of this call.
+        let info = unsafe { stat_by_handle(file.as_raw_handle() as RawHandle) }
+            .expect("GetFileInformationByHandle should succeed");
+        assert_eq!(
+            info.link_count, 2,
+            "a fresh hard link should bring the count to 2"
+        );
+
+        drop(file);
+        std::fs::remove_dir_all(&dir).expect("cleaning up the test directory should succeed");
+    }
+
+    #[test]
+    fn create_hard_link_fails_for_a_nonexistent_target() {
+        let dir = std::env::temp_dir().join("rusty_win32_hard_link_missing_target_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).expect("creating the test directory should succeed");
+        let link = dir.join("link.txt");
+        let target = dir.join("this-target-should-not-exist.txt");
+
+        let err = create_hard_link(link.to_str().unwrap(), target.to_str().unwrap()).unwrap_err();
+        assert_eq!(err, Win32Error::ERROR_FILE_NOT_FOUND);
 
         std::fs::remove_dir_all(&dir).expect("cleaning up the test directory should succeed");
     }
