@@ -342,3 +342,12 @@ pub mod registry;
 // `rusty_win32::security::*`.
 #[cfg(windows)]
 pub mod security;
+
+// `service` is a third brand-new round-2 subsystem (same previously-
+// excluded-by-non-goals history as `registry`/`security`) — a
+// `systemctl`-equivalent: list/query/start/stop a named Windows service.
+// Starts with just the SCM/service handle lifecycle. Not re-exported at
+// the crate root, for the same reason as the others above — reach it via
+// `rusty_win32::service::*`.
+#[cfg(windows)]
+pub mod service;

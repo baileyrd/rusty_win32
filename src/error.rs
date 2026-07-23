@@ -155,6 +155,7 @@ win32_errors! {
     ERROR_NOTIFY_ENUM_DIR = 1022 => "the buffer for the directory-change notifications overflowed",
     ERROR_NO_MORE_ITEMS = 259 => "no more data is available",
     ERROR_INVALID_SID = 1337 => "the security ID structure is invalid",
+    ERROR_SERVICE_DOES_NOT_EXIST = 1060 => "the specified service does not exist as an installed service",
 }
 
 impl core::error::Error for Win32Error {}

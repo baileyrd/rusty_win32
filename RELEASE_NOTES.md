@@ -6,6 +6,24 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #236 — service: add open_manager/open_service/close
+**2026-07-23** · [#236](https://github.com/baileyrd/rusty_win32/pull/236)
+
+- **Added:** new `service` module — `service::open_manager`/
+  `service::open_service`/`service::close` (`OpenSCManagerW`/
+  `OpenServiceW`/`CloseServiceHandle`) plus `SC_MANAGER_CONNECT`/
+  `SERVICE_QUERY_CONFIG`/`SERVICE_QUERY_STATUS`, closing issue #165 —
+  the SCM/service handle lifecycle, first piece of a `systemctl`-
+  equivalent (list/query/start/stop a named service), previously
+  excluded by this crate's own non-goals, now in scope per explicit
+  round-2 direction. `SC_HANDLE` is reused as `handle::RawHandle`
+  (matching the issue's own literal signature) rather than a distinct
+  type — it's ABI-compatible (`DECLARE_HANDLE`-based, exactly like
+  `HANDLE` itself) — but its destructor is always `service::close`,
+  never `handle`'s own close functions. Tested against the well-known
+  "EventLog" service, present on every Windows edition including Server
+  Core.
+
 ## PR #235 — security: add sd_to_string/string_to_sd
 **2026-07-23** · [#235](https://github.com/baileyrd/rusty_win32/pull/235)
 
