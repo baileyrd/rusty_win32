@@ -6,6 +6,23 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #238 — service: add status
+**2026-07-23** · [#238](https://github.com/baileyrd/rusty_win32/pull/238)
+
+- **Added:** `service::status` (`QueryServiceStatusEx`,
+  `SC_STATUS_PROCESS_INFO`) plus `ServiceStatus` and the seven
+  `SERVICE_STOPPED`/`SERVICE_START_PENDING`/`SERVICE_STOP_PENDING`/
+  `SERVICE_RUNNING`/`SERVICE_CONTINUE_PENDING`/`SERVICE_PAUSE_PENDING`/
+  `SERVICE_PAUSED` state constants, closing issue #167 — one named
+  service's live status including its backing process id, superseding
+  the older, pid-less `QueryServiceStatus`. `ServiceStatus` carries the
+  same fields as PR #237's `ServiceStatusEntry`, minus the two names (a
+  caller querying by handle already knows which service it is); both
+  reuse the same fixed-size, no-pointers `SERVICE_STATUS_PROCESS` FFI
+  mirror, so unlike `enum_services` no growable buffer is needed — its
+  exact size is known at compile time. Tested against the well-known
+  "EventLog" service (same choice as PRs #236/#237).
+
 ## PR #237 — service: add enum_services
 **2026-07-23** · [#237](https://github.com/baileyrd/rusty_win32/pull/237)
 

@@ -32,6 +32,13 @@ unsafe extern "system" {
     ) -> RawHandle;
     fn OpenServiceW(scm: RawHandle, service_name: *const u16, desired_access: u32) -> RawHandle;
     fn CloseServiceHandle(handle: RawHandle) -> i32;
+    fn QueryServiceStatusEx(
+        handle: RawHandle,
+        info_level: u32,
+        buffer: *mut u8,
+        buf_size: u32,
+        bytes_needed: *mut u32,
+    ) -> i32;
     fn EnumServicesStatusExW(
         scm: RawHandle,
         info_level: u32,
@@ -153,6 +160,20 @@ pub const SERVICE_INACTIVE: u32 = 0x0000_0002;
 /// mingw-w64's own `winsvc.h` with a compiled `_Static_assert` probe.
 pub const SERVICE_STATE_ALL: u32 = SERVICE_ACTIVE | SERVICE_INACTIVE;
 
+/// `SERVICE_STATUS_PROCESS.dwCurrentState`'s seven possible values,
+/// exposed raw and policy-free (matching this crate's existing
+/// convention for other bitmask/status fields) rather than as an enum —
+/// [`ServiceStatus::current_state`]/[`ServiceStatusEntry::current_state`]
+/// carry one of these. Verified against mingw-w64's own `winsvc.h` with a
+/// compiled `_Static_assert` probe.
+pub const SERVICE_STOPPED: u32 = 0x0000_0001;
+pub const SERVICE_START_PENDING: u32 = 0x0000_0002;
+pub const SERVICE_STOP_PENDING: u32 = 0x0000_0003;
+pub const SERVICE_RUNNING: u32 = 0x0000_0004;
+pub const SERVICE_CONTINUE_PENDING: u32 = 0x0000_0005;
+pub const SERVICE_PAUSE_PENDING: u32 = 0x0000_0006;
+pub const SERVICE_PAUSED: u32 = 0x0000_0007;
+
 // SERVICE_STATUS_PROCESS: `size_of` 36 — nine plain `DWORD`s, no padding.
 // Verified against mingw-w64's own `winsvc.h` with a compiled
 // `_Static_assert` probe.
@@ -207,6 +228,74 @@ pub struct ServiceStatusEntry {
     pub wait_hint: u32,
     pub process_id: u32,
     pub service_flags: u32,
+}
+
+/// `SC_STATUS_PROCESS_INFO` — `QueryServiceStatusEx`'s only defined
+/// `SC_STATUS_TYPE` value (the `InfoLevel` parameter always takes this;
+/// Windows has never defined another). Verified against mingw-w64's own
+/// `winsvc.h` with a compiled `_Static_assert` probe.
+const SC_STATUS_PROCESS_INFO: u32 = 0;
+
+/// One service's live status, as returned by [`status`] — the same
+/// fields [`ServiceStatusEntry`] carries, minus the two names (a caller
+/// querying a single service by handle already knows which one it is).
+/// Includes the backing process id ([`ServiceStatus::process_id`]),
+/// superseding the older, pid-less `QueryServiceStatus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceStatus {
+    pub service_type: u32,
+    pub current_state: u32,
+    pub controls_accepted: u32,
+    pub win32_exit_code: u32,
+    pub service_specific_exit_code: u32,
+    pub check_point: u32,
+    pub wait_hint: u32,
+    pub process_id: u32,
+    pub service_flags: u32,
+}
+
+/// Query `handle`'s live status — `QueryServiceStatusEx`
+/// (`SC_STATUS_PROCESS_INFO`), including the backing process id,
+/// superseding the older, pid-less `QueryServiceStatus`.
+///
+/// # Safety
+///
+/// `handle` must be a currently-open, valid service handle from
+/// [`open_service`] with at least [`SERVICE_QUERY_STATUS`].
+pub unsafe fn status(handle: RawHandle) -> Result<ServiceStatus, Win32Error> {
+    let mut raw = core::mem::MaybeUninit::<ServiceStatusProcess>::uninit();
+    let mut bytes_needed: u32 = 0;
+    // SAFETY: `handle` is caller-supplied per this function's own safety
+    // contract; `raw` is a valid, exactly `SERVICE_STATUS_PROCESS`-sized
+    // out-buffer, matched by the `size_of` passed as `cbBufSize`;
+    // `bytes_needed` is a valid out-pointer.
+    let ok = unsafe {
+        QueryServiceStatusEx(
+            handle,
+            SC_STATUS_PROCESS_INFO,
+            raw.as_mut_ptr().cast(),
+            core::mem::size_of::<ServiceStatusProcess>() as u32,
+            &mut bytes_needed,
+        )
+    };
+    if ok == 0 {
+        return Err(Win32Error::last());
+    }
+    // SAFETY: a successful call with a buffer already sized to exactly
+    // `size_of::<ServiceStatusProcess>()` guarantees the whole struct was
+    // written.
+    let raw = unsafe { raw.assume_init() };
+    Ok(ServiceStatus {
+        service_type: raw.service_type,
+        current_state: raw.current_state,
+        controls_accepted: raw.controls_accepted,
+        win32_exit_code: raw.win32_exit_code,
+        service_specific_exit_code: raw.service_specific_exit_code,
+        check_point: raw.check_point,
+        wait_hint: raw.wait_hint,
+        process_id: raw.process_id,
+        service_flags: raw.service_flags,
+    })
 }
 
 /// Decode a NUL-terminated wide string pointed to by `ptr` — used for
@@ -415,6 +504,43 @@ mod tests {
         );
 
         // SAFETY: `scm` is still open (not yet closed).
+        unsafe { close(scm) }.expect("CloseServiceHandle should succeed on the SCM handle");
+    }
+
+    #[test]
+    fn status_reports_a_plausible_state_for_the_event_log_service() {
+        let scm = open_manager(SC_MANAGER_CONNECT)
+            .expect("OpenSCManagerW should succeed with SC_MANAGER_CONNECT");
+        // SAFETY: `scm` is valid and open from the call just above.
+        let service = unsafe { open_service(scm, "EventLog", SERVICE_QUERY_STATUS) }
+            .expect("OpenServiceW should succeed for the well-known EventLog service");
+
+        // SAFETY: `service` is valid and open from the call just above.
+        let status = unsafe { status(service) }
+            .expect("QueryServiceStatusEx should succeed for a valid service handle");
+        assert!(
+            matches!(
+                status.current_state,
+                SERVICE_STOPPED
+                    | SERVICE_START_PENDING
+                    | SERVICE_STOP_PENDING
+                    | SERVICE_RUNNING
+                    | SERVICE_CONTINUE_PENDING
+                    | SERVICE_PAUSE_PENDING
+                    | SERVICE_PAUSED
+            ),
+            "current_state should be one of the seven documented SERVICE_* states, got: {}",
+            status.current_state
+        );
+        if status.current_state == SERVICE_RUNNING {
+            assert!(
+                status.process_id != 0,
+                "a running service should report a nonzero backing process id"
+            );
+        }
+
+        // SAFETY: `service`/`scm` are still open (not yet closed).
+        unsafe { close(service) }.expect("CloseServiceHandle should succeed on the service handle");
         unsafe { close(scm) }.expect("CloseServiceHandle should succeed on the SCM handle");
     }
 }

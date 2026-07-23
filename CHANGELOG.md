@@ -5,6 +5,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `service::status` (`QueryServiceStatusEx`, `SC_STATUS_PROCESS_INFO`)
+  plus `ServiceStatus` and the seven `SERVICE_STOPPED`/
+  `SERVICE_START_PENDING`/`SERVICE_STOP_PENDING`/`SERVICE_RUNNING`/
+  `SERVICE_CONTINUE_PENDING`/`SERVICE_PAUSE_PENDING`/`SERVICE_PAUSED`
+  state constants — one named service's live status including its
+  backing process id, superseding the older, pid-less
+  `QueryServiceStatus`.
 - `service::enum_services` (`EnumServicesStatusExW`) plus
   `ServiceStatusEntry` and `SC_MANAGER_ENUMERATE_SERVICE`/`SERVICE_WIN32`/
   `SERVICE_ACTIVE`/`SERVICE_INACTIVE`/`SERVICE_STATE_ALL` — list every
