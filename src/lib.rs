@@ -334,3 +334,11 @@ pub mod watch;
 // it via `rusty_win32::registry::*`.
 #[cfg(windows)]
 pub mod registry;
+
+// `security` is another brand-new round-2 subsystem (same previously-
+// excluded-by-non-goals history as `registry`), starting from the core
+// path → owner/DACL round trip. Not re-exported at the crate root, for
+// the same reason as `registry`'s and the others above — reach it via
+// `rusty_win32::security::*`.
+#[cfg(windows)]
+pub mod security;

@@ -5,6 +5,14 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `security` module (new subsystem): `security::path_security_info`/
+  `security::set_path_security_info` (`GetNamedSecurityInfoW`/
+  `SetNamedSecurityInfoW`, freeing via `LocalFree` on `Drop`) plus the
+  `PathSecurityInfo` type and `SecurityInfoFlags` (`OWNER_*`/`GROUP_*`/
+  `DACL_SECURITY_INFORMATION`) — the core path → owner `PSID`/DACL `PACL`
+  round trip, first piece of file/directory security inspection and
+  modification, previously excluded by this crate's own non-goals, now
+  in scope per explicit round-2 direction.
 - `registry::delete_tree` (`RegDeleteTreeW`) — recursively delete a
   subkey and everything beneath it in one call, without
   `delete_key`'s leaf-only restriction forcing a hand-rolled
