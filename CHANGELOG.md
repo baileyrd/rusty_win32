@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `service::start` (`StartServiceW`) plus `SERVICE_START` — start an
+  already-installed service, the zero-argument case only
+  (`lpServiceArgVectors` only matters for driver-style services, out of
+  scope). Also adds `Win32Error::ERROR_SERVICE_ALREADY_RUNNING`, needed
+  for `start`'s already-running error path.
 - `service::status` (`QueryServiceStatusEx`, `SC_STATUS_PROCESS_INFO`)
   plus `ServiceStatus` and the seven `SERVICE_STOPPED`/
   `SERVICE_START_PENDING`/`SERVICE_STOP_PENDING`/`SERVICE_RUNNING`/
