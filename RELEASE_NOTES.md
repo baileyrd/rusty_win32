@@ -6,6 +6,15 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #92 — process: add process_id_of (GetProcessId)
+**2026-07-23** · [#92](https://github.com/baileyrd/rusty_win32/pull/92)
+
+- **Added:** `process::process_id_of` (`GetProcessId`), the reverse of
+  `open_by_pid`'s (issue #13) pid-to-`HANDLE` mapping — closing issue #59
+  from the parity-loop sweep. Needed anywhere rush holds a `HANDLE` (e.g.
+  `spawn_suspended`'s own `process` handle) and needs to report/print its
+  numeric pid without having cached it separately.
+
 ## PR #91 — path: add full_path (GetFullPathNameW)
 **2026-07-23** · [#91](https://github.com/baileyrd/rusty_win32/pull/91)
 
