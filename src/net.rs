@@ -31,6 +31,10 @@ unsafe extern "system" {
     #[link_name = "socket"]
     fn raw_socket(address_family: i32, kind: i32, protocol: i32) -> usize;
     fn closesocket(sock: usize) -> i32;
+    // Same lowercase-symbol collision as `socket` above -- `bind` would
+    // otherwise clash with this module's own `bind` wrapper function.
+    #[link_name = "bind"]
+    fn raw_bind(sock: usize, name: *const u8, namelen: i32) -> i32;
 }
 
 /// `INVALID_SOCKET` — the sentinel `socket` returns on failure (real
@@ -197,6 +201,209 @@ pub fn cleanup() -> Result<(), crate::error::Win32Error> {
     }
 }
 
+/// A local or peer socket address, IPv4 or IPv6 — the `{ip, port}`
+/// representation every address-taking function in this module
+/// (`bind`/`connect`/`accept`/`sendto`/`recvfrom`/`local_addr`/
+/// `peer_addr`) uses, backed by [`to_sockaddr`]/[`from_sockaddr`]
+/// converting to/from the real `sockaddr_in`/`sockaddr_in6` wire
+/// format. `ip` octets are stored exactly as they appear on the wire
+/// (already address-order, not a multi-byte integer needing an
+/// endian conversion) — only `port` (and, for IPv6, nothing else) needs
+/// network-byte-order handling, done internally by `to_sockaddr`/
+/// `from_sockaddr`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketAddr {
+    V4 {
+        ip: [u8; 4],
+        port: u16,
+    },
+    V6 {
+        ip: [u8; 16],
+        port: u16,
+        /// `sin6_flowinfo` — an opaque 32-bit value most callers leave
+        /// `0`; exposed raw and policy-free like this crate's other
+        /// bitmask-shaped fields, never interpreted or byte-swapped by
+        /// this module.
+        flow_info: u32,
+        /// `sin6_scope_id` — the IPv6 zone/interface index for
+        /// link-local addresses; `0` for a global address. Exposed raw,
+        /// same treatment as `flow_info`.
+        scope_id: u32,
+    },
+}
+
+// sockaddr_in: `size_of` 16 — verified field-by-field against
+// mingw-w64's own `psdk_inc/_ip_types.h` with a compiled
+// `_Static_assert` probe.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SockAddrIn {
+    family: i16,
+    port: u16,
+    addr: [u8; 4],
+    zero: [u8; 8],
+}
+const _: () = assert!(core::mem::size_of::<SockAddrIn>() == 16);
+
+// sockaddr_in6: `size_of` 28 — verified field-by-field against
+// mingw-w64's own `ws2ipdef.h` with a compiled `_Static_assert` probe.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SockAddrIn6 {
+    family: i16,
+    port: u16,
+    flow_info: u32,
+    addr: [u8; 16],
+    scope_id: u32,
+}
+const _: () = assert!(core::mem::size_of::<SockAddrIn6>() == 28);
+
+/// A `sockaddr`-shaped byte buffer big enough for either `sockaddr_in`
+/// or `sockaddr_in6`, plus the real length to pass as a Win32
+/// `namelen`/`addrlen` parameter — the encoded form [`to_sockaddr`]
+/// produces, ready to hand to `bind`/`connect`/… as a `(*const u8,
+/// i32)` pair via [`RawSockAddr::as_ptr`]/[`RawSockAddr::len`].
+pub(crate) struct RawSockAddr {
+    bytes: [u8; 28],
+    len: i32,
+}
+
+impl RawSockAddr {
+    pub(crate) fn as_ptr(&self) -> *const u8 {
+        self.bytes.as_ptr()
+    }
+
+    pub(crate) fn len(&self) -> i32 {
+        self.len
+    }
+}
+
+/// Encode `addr` into its real `sockaddr_in`/`sockaddr_in6` wire form —
+/// backing every address-taking function in this module. The reverse of
+/// [`from_sockaddr`].
+pub(crate) fn to_sockaddr(addr: &SocketAddr) -> RawSockAddr {
+    let mut bytes = [0u8; 28];
+    let len = match *addr {
+        SocketAddr::V4 { ip, port } => {
+            let raw = SockAddrIn {
+                family: AddressFamily::Inet as i16,
+                port: port.to_be(),
+                addr: ip,
+                zero: [0; 8],
+            };
+            let size = core::mem::size_of::<SockAddrIn>();
+            // SAFETY: `raw` is a plain-old-data `#[repr(C)]` value (only
+            // integer/byte-array fields, no padding this crate reads
+            // uninitialized), valid to reinterpret as its own `size_of`
+            // bytes.
+            let raw_bytes =
+                unsafe { core::slice::from_raw_parts((&raw as *const SockAddrIn).cast(), size) };
+            bytes[..size].copy_from_slice(raw_bytes);
+            size as i32
+        }
+        SocketAddr::V6 {
+            ip,
+            port,
+            flow_info,
+            scope_id,
+        } => {
+            let raw = SockAddrIn6 {
+                family: AddressFamily::Inet6 as i16,
+                port: port.to_be(),
+                flow_info,
+                addr: ip,
+                scope_id,
+            };
+            let size = core::mem::size_of::<SockAddrIn6>();
+            // SAFETY: same reasoning as the `SockAddrIn` case above.
+            let raw_bytes =
+                unsafe { core::slice::from_raw_parts((&raw as *const SockAddrIn6).cast(), size) };
+            bytes[..size].copy_from_slice(raw_bytes);
+            size as i32
+        }
+    };
+    RawSockAddr { bytes, len }
+}
+
+/// Decode a `sockaddr_in`/`sockaddr_in6` wire-format buffer back into a
+/// [`SocketAddr`] — the reverse of [`to_sockaddr`], used by functions
+/// that report a peer/local address (`accept`/`recvfrom`/`local_addr`/
+/// `peer_addr`).
+///
+/// # Safety
+///
+/// `ptr` must point to at least `len` readable bytes, and (if `len` is
+/// large enough to name one) a valid `sin_family`/`sin6_family` at
+/// offset `0`.
+// Not yet called outside this module's own tests: its real callers
+// (`accept`/`recvfrom`/`local_addr`/`peer_addr`) are later round-2
+// items, not yet implemented -- built now alongside `to_sockaddr`
+// since both directions are this module's shared address plumbing
+// (see this crate's own issue #185).
+#[allow(dead_code)]
+pub(crate) unsafe fn from_sockaddr(
+    ptr: *const u8,
+    len: i32,
+) -> Result<SocketAddr, crate::error::Win32Error> {
+    let len = len as usize;
+    if len >= core::mem::size_of::<i16>() {
+        // SAFETY: `ptr` is caller-supplied per this function's own
+        // safety contract, with at least `size_of::<i16>()` bytes
+        // readable (just checked above).
+        let family = unsafe { core::ptr::read_unaligned(ptr.cast::<i16>()) };
+        if family as i32 == AddressFamily::Inet as i32 && len >= core::mem::size_of::<SockAddrIn>()
+        {
+            // SAFETY: `ptr` has at least `size_of::<SockAddrIn>()`
+            // readable bytes, just checked above.
+            let raw: SockAddrIn = unsafe { core::ptr::read_unaligned(ptr.cast()) };
+            return Ok(SocketAddr::V4 {
+                ip: raw.addr,
+                port: u16::from_be(raw.port),
+            });
+        }
+        if family as i32 == AddressFamily::Inet6 as i32
+            && len >= core::mem::size_of::<SockAddrIn6>()
+        {
+            // SAFETY: `ptr` has at least `size_of::<SockAddrIn6>()`
+            // readable bytes, just checked above.
+            let raw: SockAddrIn6 = unsafe { core::ptr::read_unaligned(ptr.cast()) };
+            return Ok(SocketAddr::V6 {
+                ip: raw.addr,
+                port: u16::from_be(raw.port),
+                flow_info: raw.flow_info,
+                scope_id: raw.scope_id,
+            });
+        }
+    }
+    Err(crate::error::Win32Error::ERROR_INVALID_PARAMETER)
+}
+
+/// Attach a local address/port to a socket — `bind`, needed before
+/// [`socket`]'s result can accept incoming connections ([`SocketKind::Stream`])
+/// or datagrams ([`SocketKind::Dgram`]) on a specific address, or before
+/// a UDP socket sends from a fixed source port.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid socket from [`socket`].
+pub unsafe fn bind(sock: RawSocket, addr: &SocketAddr) -> Result<(), crate::error::Win32Error> {
+    let raw = to_sockaddr(addr);
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `raw` is a valid `sockaddr`-shaped buffer with `raw.len()`
+    // naming its exact encoded length.
+    let ok = unsafe { raw_bind(sock, raw.as_ptr(), raw.len()) };
+    if ok != 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,5 +459,66 @@ mod tests {
             .expect("closesocket should succeed on a freshly created socket");
 
         cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn to_sockaddr_then_from_sockaddr_round_trips_an_ipv4_address() {
+        let addr = SocketAddr::V4 {
+            ip: [127, 0, 0, 1],
+            port: 8080,
+        };
+        let raw = to_sockaddr(&addr);
+        assert_eq!(raw.len(), 16, "an encoded IPv4 sockaddr should be 16 bytes");
+
+        // SAFETY: `raw` was just filled with exactly `raw.len()` valid
+        // bytes above.
+        let decoded = unsafe { from_sockaddr(raw.as_ptr(), raw.len()) }
+            .expect("decoding a just-encoded sockaddr should succeed");
+        assert_eq!(decoded, addr);
+    }
+
+    #[test]
+    fn to_sockaddr_then_from_sockaddr_round_trips_an_ipv6_address() {
+        let addr = SocketAddr::V6 {
+            ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            port: 9090,
+            flow_info: 0,
+            scope_id: 0,
+        };
+        let raw = to_sockaddr(&addr);
+        assert_eq!(raw.len(), 28, "an encoded IPv6 sockaddr should be 28 bytes");
+
+        // SAFETY: `raw` was just filled with exactly `raw.len()` valid
+        // bytes above.
+        let decoded = unsafe { from_sockaddr(raw.as_ptr(), raw.len()) }
+            .expect("decoding a just-encoded sockaddr should succeed");
+        assert_eq!(decoded, addr);
+    }
+
+    #[test]
+    fn to_sockaddr_stores_the_port_in_network_byte_order() {
+        let addr = SocketAddr::V4 {
+            ip: [10, 0, 0, 1],
+            port: 0x1234,
+        };
+        let raw = to_sockaddr(&addr);
+        // SAFETY: `raw` was just filled with exactly `raw.len()` valid
+        // bytes above; `sin_port` is at byte offset 2 in `sockaddr_in`.
+        let port_bytes = unsafe { core::slice::from_raw_parts(raw.as_ptr().add(2), 2) };
+        assert_eq!(
+            port_bytes,
+            &[0x12, 0x34],
+            "sin_port should be big-endian (network byte order)"
+        );
+    }
+
+    #[test]
+    fn from_sockaddr_fails_for_an_unrecognized_address_family() {
+        let bytes = [0u8; 16];
+        // SAFETY: `bytes` is a valid 16-byte buffer; its first two bytes
+        // (`sin_family`, all zero) don't match `AF_INET`/`AF_INET6`.
+        let err = unsafe { from_sockaddr(bytes.as_ptr(), bytes.len() as i32) }
+            .expect_err("from_sockaddr should fail for an unrecognized address family");
+        assert_eq!(err, crate::error::Win32Error::ERROR_INVALID_PARAMETER);
     }
 }

@@ -5,6 +5,14 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `SocketAddr` (`V4`/`V6`) plus `to_sockaddr`/`from_sockaddr` conversions
+  and the verified `sockaddr_in`/`sockaddr_in6` wire-format layouts (16
+  and 28 bytes) — the shared `{ip, port}` address plumbing every
+  address-taking `net` function needs. Implemented ahead of its own
+  filed order since `net::bind` (below) already needed it.
+- `net::bind` (`bind`) — attach a local address/port to a socket, needed
+  before a socket can accept connections/datagrams on a specific address
+  or send from a fixed source port.
 - `net::socket`/`net::close_socket` (`socket`/`closesocket`) plus
   `RawSocket`, `AddressFamily` (`Inet`/`Inet6`), `SocketKind`
   (`Stream`/`Dgram`), and `Protocol` (`Tcp`/`Udp`) — socket lifecycle
