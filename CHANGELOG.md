@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `net::htons`/`net::htonl`/`net::ntohs`/`net::ntohl` — thin wrappers
+  over the Winsock functions of the same name, for callers building or
+  parsing their own raw wire fields rather than going through
+  `SocketAddr`. This rounds out the `net` module's round-2 scope.
 - `net::resolve` (`getaddrinfo`/`freeaddrinfo`) plus `AddrInfoHints`/
   `ResolvedAddr` — hostname/service-name to address resolution, walking
   Windows' own `addrinfo` linked list and copying every entry out before
