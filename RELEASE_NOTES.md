@@ -6,6 +6,25 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #254 — net: add local_addr/peer_addr
+**2026-07-24** · [#254](https://github.com/baileyrd/rusty_win32/pull/254)
+
+- **Added:** `net::local_addr`/`net::peer_addr` (`getsockname`/
+  `getpeername`), closing issue #183 — read back a socket's own bound
+  address (e.g. after binding to an OS-assigned ephemeral port `0`) and
+  a connected socket's peer address. Both reuse the existing
+  `from_sockaddr` decoding from PR #246, with the same fixed 28-byte
+  `sockaddr`-shaped out-buffer `accept`/`recvfrom` already use. Same
+  no-collision situation as `set_sockopt`/`get_sockopt` (PR #253): the
+  real `getsockname`/`getpeername` symbols don't clash with this
+  module's `local_addr`/`peer_addr` wrapper names, so no `#[link_name]`
+  was needed. Tested `local_addr` after binding to port `0` (asserting
+  the reported port is non-zero — the whole point of the call), and
+  `peer_addr` plus `local_addr` on a real local TCP connection (the
+  client's `peer_addr` matches the server's bound address; the accepted
+  socket's `local_addr` also matches, since it inherits the listening
+  socket's local address).
+
 ## PR #253 — net: add sockopt
 **2026-07-24** · [#253](https://github.com/baileyrd/rusty_win32/pull/253)
 

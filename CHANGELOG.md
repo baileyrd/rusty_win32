@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `net::local_addr`/`net::peer_addr` (`getsockname`/`getpeername`) —
+  read back a socket's own bound address (e.g. after binding an
+  ephemeral port `0`) and a connected socket's peer address, reusing the
+  existing `from_sockaddr` decoding.
 - `net::set_sockopt`/`net::get_sockopt` (`setsockopt`/`getsockopt`) plus
   `SockOpt`/`SockOptKind`/`SockOptValue` — `SO_REUSEADDR`, `SO_RCVTIMEO`/
   `SO_SNDTIMEO` (a plain millisecond `DWORD` on Windows, unlike POSIX's
