@@ -6,6 +6,22 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #250 — net: add send/recv
+**2026-07-24** · [#250](https://github.com/baileyrd/rusty_win32/pull/250)
+
+- **Added:** `net::send`/`net::recv` (`send`/`recv`), closing issue #179
+  — byte-slice I/O on a connected socket, thin wrappers matching
+  `console::read`/`console::write`'s shape. `recv` reports `Ok(0)` for
+  the peer's orderly shutdown, not an error — the TCP analog of
+  `ReadFile` reporting end-of-file. Same lowercase-symbol collision as
+  `socket`/`bind`/`listen`/`accept`/`connect` — bound via
+  `#[link_name = "send"]`/`#[link_name = "recv"]` on distinctly-named
+  `raw_send`/`raw_recv` externs. Tested end-to-end over a real local TCP
+  connection (server/client both this crate's own sockets, connected via
+  PR #249's `connect`/`accept`): sends a message from the client and
+  reads it back on the accepted socket, verifying both the byte count
+  and content.
+
 ## PR #249 — net: add connect
 **2026-07-24** · [#249](https://github.com/baileyrd/rusty_win32/pull/249)
 

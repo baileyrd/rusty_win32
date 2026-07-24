@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `net::send`/`net::recv` (`send`/`recv`) — byte-slice I/O on a
+  connected socket, thin wrappers matching `console::read`/
+  `console::write`'s shape. `recv` reports `Ok(0)` for the peer's
+  orderly shutdown, not an error (the TCP analog of `ReadFile`
+  reporting end-of-file).
 - `net::connect` (`connect`) — TCP client connect, or fix a UDP socket's
   default peer for future `send`/`recv` calls.
 - `net::accept` (`accept`) — accept one incoming TCP connection,

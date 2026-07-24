@@ -50,6 +50,13 @@ unsafe extern "system" {
     // `connect` wrapper function.
     #[link_name = "connect"]
     fn raw_connect(sock: usize, name: *const u8, namelen: i32) -> i32;
+    // Same lowercase-symbol collision as `socket`/`bind`/`listen`/
+    // `accept`/`connect` above -- `send`/`recv` would otherwise clash
+    // with this module's own `send`/`recv` wrapper functions.
+    #[link_name = "send"]
+    fn raw_send(sock: usize, buf: *const u8, len: i32, flags: i32) -> i32;
+    #[link_name = "recv"]
+    fn raw_recv(sock: usize, buf: *mut u8, len: i32, flags: i32) -> i32;
 }
 
 /// `INVALID_SOCKET` — the sentinel `socket` returns on failure (real
@@ -497,6 +504,61 @@ pub unsafe fn connect(sock: RawSocket, addr: &SocketAddr) -> Result<(), crate::e
     }
 }
 
+/// Send up to `buf.len()` bytes on a connected socket in one call —
+/// `send`, the Winsock analog of [`crate::console::write`]'s shape. `sock`
+/// must already be connected (a [`SocketKind::Stream`] socket from
+/// [`accept`]/after [`connect`], or a [`SocketKind::Dgram`] socket with a
+/// default peer set via [`connect`]) — `sendto` (a later round-2 item)
+/// is the connectionless alternative for a UDP socket with no fixed
+/// peer.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid, connected socket.
+pub unsafe fn send(sock: RawSocket, buf: &[u8]) -> Result<usize, crate::error::Win32Error> {
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `buf` is a valid, `buf.len()`-byte readable buffer;
+    // `flags = 0` requests ordinary blocking send behavior, this
+    // module's only supported case.
+    let sent = unsafe { raw_send(sock, buf.as_ptr(), buf.len() as i32, 0) };
+    if sent < 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ))
+    } else {
+        Ok(sent as usize)
+    }
+}
+
+/// Read up to `buf.len()` bytes from a connected socket in one call —
+/// `recv`, the Winsock analog of [`crate::console::read`]'s shape. `Ok(0)`
+/// means the peer performed an orderly shutdown (the TCP analog of
+/// `ReadFile` reporting end-of-file) — not itself an error.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid, connected socket.
+pub unsafe fn recv(sock: RawSocket, buf: &mut [u8]) -> Result<usize, crate::error::Win32Error> {
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `buf` is a valid, `buf.len()`-byte writable buffer;
+    // `flags = 0` requests ordinary blocking receive behavior, this
+    // module's only supported case.
+    let received = unsafe { raw_recv(sock, buf.as_mut_ptr(), buf.len() as i32, 0) };
+    if received < 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ))
+    } else {
+        Ok(received as usize)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,6 +804,73 @@ mod tests {
             }
             SocketAddr::V6 { .. } => panic!("expected an IPv4 peer address, got: {peer:?}"),
         }
+
+        // SAFETY: `client`/`accepted`/`server` were all just
+        // created/opened above and haven't been closed yet.
+        unsafe { close_socket(client) }.expect("closesocket should succeed on the client socket");
+        unsafe { close_socket(accepted) }
+            .expect("closesocket should succeed on the accepted socket");
+        unsafe { close_socket(server) }.expect("closesocket should succeed on the server socket");
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn send_then_recv_carries_bytes_over_a_local_tcp_connection() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let server = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating the server's TCP/IPv4 socket");
+        const TEST_PORT: u16 = 47952;
+        let addr = SocketAddr::V4 {
+            ip: [127, 0, 0, 1],
+            port: TEST_PORT,
+        };
+        // SAFETY: `server` was just created above and hasn't been closed
+        // yet.
+        unsafe { bind(server, &addr) }.expect("bind should succeed on 127.0.0.1:TEST_PORT");
+        // SAFETY: `server` is still open, now bound.
+        unsafe { listen(server, 1) }
+            .expect("listen should succeed on the freshly bound server socket");
+
+        let accept_thread = std::thread::spawn(move || {
+            // SAFETY: `server` is open and listening from the calls
+            // above, for the whole lifetime of this thread.
+            unsafe { accept(server) }
+        });
+
+        let client = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating the client's TCP/IPv4 socket");
+        // SAFETY: `client` was just created above and hasn't been closed
+        // yet.
+        unsafe { connect(client, &addr) }
+            .expect("connect should succeed reaching the listening server socket");
+
+        let (accepted, _peer) = accept_thread
+            .join()
+            .expect("the accept thread should not panic")
+            .expect("accept should succeed once the client connects");
+
+        const MESSAGE: &[u8] = b"hello over rusty_win32 net::send/recv";
+        // SAFETY: `client` is connected from the calls above.
+        let sent = unsafe { send(client, MESSAGE) }.expect("send should succeed on the client");
+        assert_eq!(
+            sent,
+            MESSAGE.len(),
+            "send should report the full message written"
+        );
+
+        let mut buf = [0u8; MESSAGE.len()];
+        // SAFETY: `accepted` is a valid, connected socket from `accept`
+        // above.
+        let received =
+            unsafe { recv(accepted, &mut buf) }.expect("recv should succeed on the accepted end");
+        assert_eq!(
+            received,
+            MESSAGE.len(),
+            "recv should report the full message read"
+        );
+        assert_eq!(&buf[..received], MESSAGE);
 
         // SAFETY: `client`/`accepted`/`server` were all just
         // created/opened above and haven't been closed yet.
