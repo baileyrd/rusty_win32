@@ -107,6 +107,17 @@ unsafe extern "system" {
         res: *mut *mut AddrInfoRaw,
     ) -> i32;
     fn freeaddrinfo(res: *mut AddrInfoRaw);
+    // Same lowercase-symbol collision as the rest of this module's
+    // Winsock wrappers -- `htons`/`htonl`/`ntohs`/`ntohl` would otherwise
+    // clash with this module's own functions of the same name below.
+    #[link_name = "htons"]
+    fn raw_htons(hostshort: u16) -> u16;
+    #[link_name = "htonl"]
+    fn raw_htonl(hostlong: u32) -> u32;
+    #[link_name = "ntohs"]
+    fn raw_ntohs(netshort: u16) -> u16;
+    #[link_name = "ntohl"]
+    fn raw_ntohl(netlong: u32) -> u32;
 }
 
 /// `INVALID_SOCKET` — the sentinel `socket` returns on failure (real
@@ -1072,6 +1083,42 @@ pub fn resolve(
     Ok(results)
 }
 
+/// Convert a 16-bit value from host to network (big-endian) byte order —
+/// `htons`. This module's own [`to_sockaddr`] already applies this
+/// conversion internally to every port it encodes; this standalone
+/// wrapper is for callers building/parsing their own raw wire fields
+/// (e.g. an application-level protocol) rather than going through
+/// [`SocketAddr`].
+pub fn htons(hostshort: u16) -> u16 {
+    // SAFETY: `htons` is a pure, side-effect-free byte-swap with no
+    // preconditions -- unlike every other function in this module, it
+    // doesn't touch a socket or need `startup` to have been called
+    // first.
+    unsafe { raw_htons(hostshort) }
+}
+
+/// Convert a 32-bit value from host to network (big-endian) byte order —
+/// `htonl`. Same use case as [`htons`], for a raw 32-bit wire field (a
+/// packed IPv4 address, a sequence number, …) rather than a 16-bit port.
+pub fn htonl(hostlong: u32) -> u32 {
+    // SAFETY: same reasoning as `htons` above.
+    unsafe { raw_htonl(hostlong) }
+}
+
+/// Convert a 16-bit value from network (big-endian) to host byte order —
+/// `ntohs`, the reverse of [`htons`].
+pub fn ntohs(netshort: u16) -> u16 {
+    // SAFETY: same reasoning as `htons` above.
+    unsafe { raw_ntohs(netshort) }
+}
+
+/// Convert a 32-bit value from network (big-endian) to host byte order —
+/// `ntohl`, the reverse of [`htonl`].
+pub fn ntohl(netlong: u32) -> u32 {
+    // SAFETY: same reasoning as `htons` above.
+    unsafe { raw_ntohl(netlong) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1825,5 +1872,35 @@ mod tests {
             .expect_err("resolve should fail for an unrecognized, made-up service name");
 
         cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn htons_then_ntohs_round_trips() {
+        // No startup()/cleanup() needed here -- unlike every other
+        // function in this module, htons/htonl/ntohs/ntohl are pure
+        // byte-swaps with no socket/Winsock-lifecycle dependency.
+        assert_eq!(ntohs(htons(0x1234)), 0x1234);
+    }
+
+    #[test]
+    fn htonl_then_ntohl_round_trips() {
+        assert_eq!(ntohl(htonl(0x1234_5678)), 0x1234_5678);
+    }
+
+    #[test]
+    fn htons_matches_to_sockaddrs_own_port_byte_swap() {
+        // to_sockaddr already applies this same conversion internally
+        // (verified by to_sockaddr_stores_the_port_in_network_byte_order
+        // above) -- htons should agree with it exactly.
+        assert_eq!(htons(0x1234), 0x1234u16.to_be());
+    }
+
+    #[test]
+    fn htonl_is_the_identity_on_a_palindromic_value() {
+        // 0xAABBBBAA's bytes (AA BB BB AA) read the same forwards and
+        // backwards, so it's unaffected by any byte-swap -- a simple,
+        // endian-independent sanity check that doesn't rely on assuming
+        // the host's own byte order.
+        assert_eq!(htonl(0xAABBBBAA), 0xAABBBBAA);
     }
 }

@@ -6,6 +6,24 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #256 — net: add byte-order conversions
+**2026-07-24** · [#256](https://github.com/baileyrd/rusty_win32/pull/256)
+
+- **Added:** `net::htons`/`net::htonl`/`net::ntohs`/`net::ntohl`, closing
+  issue #186 — thin wrappers over the real Winsock functions of the
+  same name (verified via a compiled mingw-w64 probe: `u_short`/
+  `u_long` are 16/32-bit, no socket parameter). Same lowercase-symbol
+  collision as the rest of this module's Winsock wrappers — bound via
+  `#[link_name = "htons"]`/`"htonl"`/`"ntohs"`/`"ntohl"` on distinctly-
+  named `raw_htons`/`raw_htonl`/`raw_ntohs`/`raw_ntohl` externs. Unlike
+  every other function in this module, these are pure byte-swaps with
+  no socket/Winsock-lifecycle dependency — no `startup()` call needed
+  first, and the crate-internal `to_sockaddr`/`from_sockaddr` already
+  apply the same conversion internally via `u16::to_be`/`from_be`; this
+  is the public, standalone equivalent for callers working with their
+  own raw wire fields. This closes out the `net` module's round-2 scope
+  (issues #173-186, `#185` folded early into PR #246).
+
 ## PR #255 — net: add resolve
 **2026-07-24** · [#255](https://github.com/baileyrd/rusty_win32/pull/255)
 
