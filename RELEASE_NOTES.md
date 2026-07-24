@@ -6,6 +6,33 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #255 — net: add resolve
+**2026-07-24** · [#255](https://github.com/baileyrd/rusty_win32/pull/255)
+
+- **Added:** `net::resolve` (`getaddrinfo`/`freeaddrinfo`) plus
+  `AddrInfoHints`/`ResolvedAddr`, closing issue #184 — hostname/
+  service-name to address resolution. The real `addrinfo` layout (48
+  bytes, 8-byte aligned; every field's offset) verified via a compiled
+  mingw-w64 probe. `resolve` walks Windows' own returned linked list,
+  copies each entry's family/socktype/protocol/address out into an
+  owned `Vec<ResolvedAddr>` (reusing the existing `from_sockaddr`
+  decoding), then calls `freeaddrinfo` before returning — nothing
+  borrowed from Windows-owned memory escapes the call. An entry whose
+  family/socktype/protocol falls outside this module's supported set is
+  silently skipped rather than failing the whole resolution, the same
+  "explicitly out of scope" policy already applied at the `socket`/
+  `bind` boundary. Unlike the rest of this module's `WSAGetLastError`-
+  reporting functions, failure comes back via `getaddrinfo`'s own return
+  value directly (`EAI_*` codes are aliases of the ordinary `WSA*` error
+  codes on Windows) — the same convention `startup`/`WSAStartup`
+  already uses. First user of `alloc::vec::Vec` in this module (every
+  earlier `net` function used fixed-size stack buffers), needed since
+  the result count is unbounded. Tests resolve numeric IPv4/IPv6
+  hosts and a numeric port (no real name resolution, so no network
+  dependency), confirm `AF_UNSPEC` (`hints.family: None`) still resolves
+  a numeric IPv4 host, and confirm a made-up, non-numeric service name
+  fails without needing network access.
+
 ## PR #254 — net: add local_addr/peer_addr
 **2026-07-24** · [#254](https://github.com/baileyrd/rusty_win32/pull/254)
 

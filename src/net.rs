@@ -19,6 +19,9 @@
 //! `security::BuiltAcl` are the only exceptions, none of which apply to
 //! a process-global load count like this one).
 
+extern crate alloc;
+use alloc::vec::Vec;
+
 #[link(name = "ws2_32")]
 unsafe extern "system" {
     fn WSAStartup(version_requested: u16, wsa_data: *mut WsaData) -> i32;
@@ -94,6 +97,16 @@ unsafe extern "system" {
     // `peer_addr` wrapper functions -- no `#[link_name]` needed.
     fn getsockname(sock: usize, name: *mut u8, namelen: *mut i32) -> i32;
     fn getpeername(sock: usize, name: *mut u8, namelen: *mut i32) -> i32;
+    // No collision here either: the real symbols are `getaddrinfo`/
+    // `freeaddrinfo`, distinct from this module's `resolve` wrapper
+    // function -- no `#[link_name]` needed.
+    fn getaddrinfo(
+        node: *const u8,
+        service: *const u8,
+        hints: *const AddrInfoRaw,
+        res: *mut *mut AddrInfoRaw,
+    ) -> i32;
+    fn freeaddrinfo(res: *mut AddrInfoRaw);
 }
 
 /// `INVALID_SOCKET` — the sentinel `socket` returns on failure (real
@@ -911,6 +924,154 @@ pub unsafe fn peer_addr(sock: RawSocket) -> Result<SocketAddr, crate::error::Win
     unsafe { from_sockaddr(buf.as_ptr(), addr_len) }
 }
 
+// addrinfo (64-bit layout, per mingw-w64's own `ws2tcpip.h`): `size_of`
+// 48, 8-byte aligned, every field's offset verified with a compiled
+// `_Static_assert` probe. `ai_canonname` is never read by this module
+// (this crate requests no `AI_CANONNAME` flag) -- kept only so the
+// struct's layout matches Windows' own exactly.
+#[repr(C)]
+struct AddrInfoRaw {
+    ai_flags: i32,
+    ai_family: i32,
+    ai_socktype: i32,
+    ai_protocol: i32,
+    ai_addrlen: usize,
+    ai_canonname: *mut u8,
+    ai_addr: *mut u8,
+    ai_next: *mut AddrInfoRaw,
+}
+const _: () = assert!(core::mem::size_of::<AddrInfoRaw>() == 48);
+
+fn address_family_from_raw(value: i32) -> Option<AddressFamily> {
+    match value {
+        v if v == AddressFamily::Inet as i32 => Some(AddressFamily::Inet),
+        v if v == AddressFamily::Inet6 as i32 => Some(AddressFamily::Inet6),
+        _ => None,
+    }
+}
+
+fn socket_kind_from_raw(value: i32) -> Option<SocketKind> {
+    match value {
+        v if v == SocketKind::Stream as i32 => Some(SocketKind::Stream),
+        v if v == SocketKind::Dgram as i32 => Some(SocketKind::Dgram),
+        _ => None,
+    }
+}
+
+fn protocol_from_raw(value: i32) -> Option<Protocol> {
+    match value {
+        v if v == Protocol::Tcp as i32 => Some(Protocol::Tcp),
+        v if v == Protocol::Udp as i32 => Some(Protocol::Udp),
+        _ => None,
+    }
+}
+
+/// Hints narrowing [`resolve`]'s query — mirrors the subset of
+/// `addrinfo`'s input fields `getaddrinfo` reads. `None` in any field
+/// means "any" (`AF_UNSPEC`/`0`), matching a zeroed `hints` struct with
+/// no flags set — this module requests no `AI_*` flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AddrInfoHints {
+    pub family: Option<AddressFamily>,
+    pub socktype: Option<SocketKind>,
+    pub protocol: Option<Protocol>,
+}
+
+/// One address `getaddrinfo` returned via [`resolve`]. `getaddrinfo`
+/// itself can return other address families/socket types/protocols than
+/// the ones this module supports (a mismatched hint, or `AF_UNSPEC`
+/// turning up something exotic); [`resolve`] silently skips any entry
+/// it can't represent, the same "explicitly out of scope" policy this
+/// module's other enums already apply at the `socket`/`bind` boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedAddr {
+    pub family: AddressFamily,
+    pub socktype: SocketKind,
+    pub protocol: Protocol,
+    pub addr: SocketAddr,
+}
+
+/// Resolve a host and service name to one or more addresses —
+/// `getaddrinfo`, walking Windows' own returned linked list and copying
+/// every entry out before `freeaddrinfo`-ing it (so nothing borrowed from
+/// Windows-owned memory escapes this call). `host`/`service` may each be
+/// a numeric address/port (parsed directly, no name resolution
+/// attempted) or a real hostname/service name (resolved via DNS/the
+/// local services database, potentially blocking).
+///
+/// Reports failure via its own return value directly — Windows' `EAI_*`
+/// codes are aliases of the ordinary `WSA*` error codes (see
+/// `ws2tcpip.h`), so no separate `WSAGetLastError` call is needed, the
+/// same convention [`startup`] documents for `WSAStartup`.
+pub fn resolve(
+    host: &str,
+    service: &str,
+    hints: &AddrInfoHints,
+) -> Result<Vec<ResolvedAddr>, crate::error::Win32Error> {
+    let host_cstr: Vec<u8> = host.bytes().chain(core::iter::once(0)).collect();
+    let service_cstr: Vec<u8> = service.bytes().chain(core::iter::once(0)).collect();
+
+    let raw_hints = AddrInfoRaw {
+        ai_flags: 0,
+        ai_family: hints.family.map_or(0, |f| f as i32),
+        ai_socktype: hints.socktype.map_or(0, |k| k as i32),
+        ai_protocol: hints.protocol.map_or(0, |p| p as i32),
+        ai_addrlen: 0,
+        ai_canonname: core::ptr::null_mut(),
+        ai_addr: core::ptr::null_mut(),
+        ai_next: core::ptr::null_mut(),
+    };
+
+    let mut result_head: *mut AddrInfoRaw = core::ptr::null_mut();
+    // SAFETY: `host_cstr`/`service_cstr` are valid, nul-terminated byte
+    // buffers; `raw_hints` is a valid, fully-initialized `addrinfo` used
+    // only for its input fields; `result_head` is a valid out-pointer.
+    let status = unsafe {
+        getaddrinfo(
+            host_cstr.as_ptr(),
+            service_cstr.as_ptr(),
+            &raw_hints,
+            &mut result_head,
+        )
+    };
+    if status != 0 {
+        return Err(crate::error::Win32Error::from_raw(status as u32));
+    }
+
+    let mut results = Vec::new();
+    let mut node = result_head;
+    while !node.is_null() {
+        // SAFETY: `node` is non-null, produced by the successful
+        // `getaddrinfo` call above -- Windows guarantees each linked-list
+        // entry is a fully-initialized `addrinfo` until `freeaddrinfo`.
+        let entry = unsafe { &*node };
+        if let (Some(family), Some(socktype), Some(protocol)) = (
+            address_family_from_raw(entry.ai_family),
+            socket_kind_from_raw(entry.ai_socktype),
+            protocol_from_raw(entry.ai_protocol),
+        ) {
+            // SAFETY: `entry.ai_addr` points to `entry.ai_addrlen` valid
+            // bytes naming a `sockaddr_in`/`sockaddr_in6`, per
+            // `getaddrinfo`'s own contract.
+            if let Ok(addr) = unsafe { from_sockaddr(entry.ai_addr, entry.ai_addrlen as i32) } {
+                results.push(ResolvedAddr {
+                    family,
+                    socktype,
+                    protocol,
+                    addr,
+                });
+            }
+        }
+        node = entry.ai_next;
+    }
+
+    // SAFETY: `result_head` is exactly the pointer `getaddrinfo` returned
+    // on success above, not yet freed.
+    unsafe { freeaddrinfo(result_head) };
+
+    Ok(results)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1555,6 +1716,113 @@ mod tests {
         unsafe { close_socket(accepted) }
             .expect("closesocket should succeed on the accepted socket");
         unsafe { close_socket(server) }.expect("closesocket should succeed on the server socket");
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn resolve_returns_the_parsed_address_for_a_numeric_ipv4_host_and_service() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let hints = AddrInfoHints {
+            family: Some(AddressFamily::Inet),
+            socktype: Some(SocketKind::Stream),
+            protocol: Some(Protocol::Tcp),
+        };
+        // A numeric host/port needs no real name resolution -- getaddrinfo
+        // parses it directly, keeping this test deterministic and
+        // network-independent.
+        let results = resolve("127.0.0.1", "8080", &hints)
+            .expect("resolve should succeed for a numeric host/service");
+        assert!(
+            !results.is_empty(),
+            "resolve should return at least one address"
+        );
+        let first = results[0];
+        assert_eq!(first.family, AddressFamily::Inet);
+        assert_eq!(first.socktype, SocketKind::Stream);
+        assert_eq!(first.protocol, Protocol::Tcp);
+        assert_eq!(
+            first.addr,
+            SocketAddr::V4 {
+                ip: [127, 0, 0, 1],
+                port: 8080
+            }
+        );
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn resolve_returns_the_parsed_address_for_a_numeric_ipv6_host() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let hints = AddrInfoHints {
+            family: Some(AddressFamily::Inet6),
+            socktype: Some(SocketKind::Stream),
+            protocol: Some(Protocol::Tcp),
+        };
+        let results =
+            resolve("::1", "9090", &hints).expect("resolve should succeed for a numeric IPv6 host");
+        assert!(
+            !results.is_empty(),
+            "resolve should return at least one address"
+        );
+        let first = results[0];
+        assert_eq!(first.family, AddressFamily::Inet6);
+        assert_eq!(
+            first.addr,
+            SocketAddr::V6 {
+                ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                port: 9090,
+                flow_info: 0,
+                scope_id: 0,
+            }
+        );
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn resolve_defaults_to_any_family_when_hints_leave_it_unspecified() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let hints = AddrInfoHints {
+            family: None,
+            socktype: Some(SocketKind::Stream),
+            protocol: Some(Protocol::Tcp),
+        };
+        let results = resolve("127.0.0.1", "80", &hints)
+            .expect("resolve should succeed leaving family unspecified (AF_UNSPEC)");
+        assert!(
+            !results.is_empty(),
+            "resolve should return at least one address"
+        );
+        match results[0].addr {
+            SocketAddr::V4 { ip, port } => {
+                assert_eq!(ip, [127, 0, 0, 1]);
+                assert_eq!(port, 80);
+            }
+            SocketAddr::V6 { .. } => panic!("expected an IPv4 address for a numeric IPv4 host"),
+        }
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn resolve_fails_for_an_unrecognized_service_name() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let hints = AddrInfoHints {
+            family: Some(AddressFamily::Inet),
+            socktype: Some(SocketKind::Stream),
+            protocol: Some(Protocol::Tcp),
+        };
+        // A made-up service name (not a number, and not expected to be in
+        // the local services database) should fail to resolve without
+        // needing any actual network access.
+        resolve("127.0.0.1", "not-a-real-service-name-xyz", &hints)
+            .expect_err("resolve should fail for an unrecognized, made-up service name");
 
         cleanup().expect("WSACleanup should succeed matching the startup call above");
     }
