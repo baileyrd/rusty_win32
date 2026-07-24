@@ -682,14 +682,25 @@ pub unsafe fn config(handle: RawHandle) -> Result<ServiceConfig, Win32Error> {
     }
 }
 
+/// The number of times [`display_name`]/[`key_name`] retry after
+/// `ERROR_INSUFFICIENT_BUFFER` with a larger buffer than the size
+/// `GetServiceDisplayNameW`/`GetServiceKeyNameW` themselves reported —
+/// both functions have a real, documented-elsewhere Windows quirk where
+/// the reported required size is sometimes still one character short of
+/// what the very next call actually needs, so this crate grows past the
+/// reported size rather than trusting it exactly. Bounded rather than an
+/// unconditional loop, in case a future Windows version's behavior
+/// changes and this stops converging.
+const NAME_QUERY_MAX_RETRIES: u32 = 4;
+
 /// Translate a service's short key name (`"eventlog"`) to its
 /// human-readable display name (`"Windows Event Log"`) —
-/// `GetServiceDisplayNameW`. The reverse direction of [`key_name`]. Uses
-/// the query-size-then-allocate idiom this crate already uses for
-/// [`crate::security::lookup_account_sid`]/[`crate::registry::query_value`]:
-/// a first call reports the required buffer size via
-/// `ERROR_INSUFFICIENT_BUFFER`, then a second call with a correctly
-/// sized buffer fills it and reports the actual string length.
+/// `GetServiceDisplayNameW`. The reverse direction of [`key_name`].
+///
+/// Grows the buffer past whatever size `GetServiceDisplayNameW` itself
+/// reports on `ERROR_INSUFFICIENT_BUFFER` — see
+/// [`NAME_QUERY_MAX_RETRIES`]'s own doc comment for why one extra
+/// character of headroom isn't always enough in practice.
 ///
 /// # Safety
 ///
@@ -701,38 +712,41 @@ pub unsafe fn display_name(
 ) -> Result<alloc::string::String, Win32Error> {
     let wide_key: Vec<u16> = key_name.encode_utf16().chain(core::iter::once(0)).collect();
     let mut buf_len: u32 = 0;
-    // SAFETY: `scm` is caller-supplied per this function's own safety
-    // contract; `wide_key` is a valid, NUL-terminated UTF-16 string live
-    // for the whole call; null `display_name`/zeroed `buf_len` is
-    // documented to report the required size without needing a real
-    // buffer yet.
-    let ok = unsafe {
-        GetServiceDisplayNameW(scm, wide_key.as_ptr(), core::ptr::null_mut(), &mut buf_len)
-    };
-    if ok == 0 {
+    for _ in 0..=NAME_QUERY_MAX_RETRIES {
+        let mut buf: Vec<u16> = alloc::vec![0u16; buf_len as usize];
+        let mut actual_len = buf_len;
+        // SAFETY: `scm` is caller-supplied per this function's own safety
+        // contract; `wide_key` is a valid, NUL-terminated UTF-16 string
+        // live for the whole call; `buf` is a valid buffer (possibly
+        // zero-length, in which case a null/zeroed `lpDisplayName` with
+        // `buf_len` `0` is documented to report the required size
+        // without needing a real buffer yet) matched by `actual_len`
+        // naming its exact length.
+        let ok = unsafe {
+            GetServiceDisplayNameW(scm, wide_key.as_ptr(), buf.as_mut_ptr(), &mut actual_len)
+        };
+        if ok != 0 {
+            return Ok(alloc::string::String::from_utf16_lossy(
+                &buf[..actual_len as usize],
+            ));
+        }
         let err = Win32Error::last();
         if err != Win32Error::ERROR_INSUFFICIENT_BUFFER {
             return Err(err);
         }
+        buf_len = actual_len.max(buf_len + 1) + 1;
     }
-
-    let mut buf: Vec<u16> = alloc::vec![0u16; buf_len as usize];
-    // SAFETY: `scm`/`wide_key` as above; `buf` is a valid buffer matched
-    // by `buf_len` naming its exact length (from the query above).
-    let ok =
-        unsafe { GetServiceDisplayNameW(scm, wide_key.as_ptr(), buf.as_mut_ptr(), &mut buf_len) };
-    if ok == 0 {
-        return Err(Win32Error::last());
-    }
-    Ok(alloc::string::String::from_utf16_lossy(
-        &buf[..buf_len as usize],
-    ))
+    Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
 }
 
 /// Translate a service's human-readable display name
 /// (`"Windows Event Log"`) to its short key name (`"eventlog"`) —
-/// `GetServiceKeyNameW`. The reverse direction of [`display_name`]. Uses
-/// the same query-size-then-allocate idiom.
+/// `GetServiceKeyNameW`. The reverse direction of [`display_name`].
+///
+/// Grows the buffer past whatever size `GetServiceKeyNameW` itself
+/// reports on `ERROR_INSUFFICIENT_BUFFER` — see
+/// [`NAME_QUERY_MAX_RETRIES`]'s own doc comment for why one extra
+/// character of headroom isn't always enough in practice.
 ///
 /// # Safety
 ///
@@ -747,38 +761,36 @@ pub unsafe fn key_name(
         .chain(core::iter::once(0))
         .collect();
     let mut buf_len: u32 = 0;
-    // SAFETY: `scm` is caller-supplied per this function's own safety
-    // contract; `wide_display` is a valid, NUL-terminated UTF-16 string
-    // live for the whole call; null `service_name`/zeroed `buf_len` is
-    // documented to report the required size without needing a real
-    // buffer yet.
-    let ok = unsafe {
-        GetServiceKeyNameW(
-            scm,
-            wide_display.as_ptr(),
-            core::ptr::null_mut(),
-            &mut buf_len,
-        )
-    };
-    if ok == 0 {
+    for _ in 0..=NAME_QUERY_MAX_RETRIES {
+        let mut buf: Vec<u16> = alloc::vec![0u16; buf_len as usize];
+        let mut actual_len = buf_len;
+        // SAFETY: `scm` is caller-supplied per this function's own safety
+        // contract; `wide_display` is a valid, NUL-terminated UTF-16
+        // string live for the whole call; `buf` is a valid buffer
+        // (possibly zero-length, in which case a null/zeroed
+        // `lpServiceName` with `buf_len` `0` is documented to report the
+        // required size without needing a real buffer yet) matched by
+        // `actual_len` naming its exact length.
+        let ok = unsafe {
+            GetServiceKeyNameW(
+                scm,
+                wide_display.as_ptr(),
+                buf.as_mut_ptr(),
+                &mut actual_len,
+            )
+        };
+        if ok != 0 {
+            return Ok(alloc::string::String::from_utf16_lossy(
+                &buf[..actual_len as usize],
+            ));
+        }
         let err = Win32Error::last();
         if err != Win32Error::ERROR_INSUFFICIENT_BUFFER {
             return Err(err);
         }
+        buf_len = actual_len.max(buf_len + 1) + 1;
     }
-
-    let mut buf: Vec<u16> = alloc::vec![0u16; buf_len as usize];
-    // SAFETY: `scm`/`wide_display` as above; `buf` is a valid buffer
-    // matched by `buf_len` naming its exact length (from the query
-    // above).
-    let ok =
-        unsafe { GetServiceKeyNameW(scm, wide_display.as_ptr(), buf.as_mut_ptr(), &mut buf_len) };
-    if ok == 0 {
-        return Err(Win32Error::last());
-    }
-    Ok(alloc::string::String::from_utf16_lossy(
-        &buf[..buf_len as usize],
-    ))
+    Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
 }
 
 #[cfg(test)]
