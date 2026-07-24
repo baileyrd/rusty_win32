@@ -6,6 +6,26 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #244 — net: add startup/cleanup
+**2026-07-24** · [#244](https://github.com/baileyrd/rusty_win32/pull/244)
+
+- **Added:** new `net` module — `net::startup`/`net::cleanup`
+  (`WSAStartup`/`WSACleanup`), closing issue #173 — Winsock's own
+  load/unload lifecycle, previously excluded by this crate's own
+  non-goals, now in scope per explicit round-2 direction. The one
+  Winsock primitive with no POSIX/`rusty_libc` analog: every other
+  Winsock call is documented undefined behavior before a matching
+  `WSAStartup` or after `WSACleanup`. Windows reference-counts nested
+  `WSAStartup`/`WSACleanup` pairs internally, so no shared guard/RAII
+  type is needed — two plain functions, matching this crate's existing
+  no-`Drop`-anywhere convention. `startup` reports failure via its own
+  return value directly (never `GetLastError`); `cleanup` uses
+  `WSAGetLastError`, a distinct per-thread error slot Winsock keeps
+  separately from the ordinary `GetLastError`/`SetLastError` one. The
+  `WSADATA` out-parameter (408 bytes on 64-bit, verified field-by-field
+  against mingw-w64's own `psdk_inc/_wsadata.h`) is scratch space only,
+  never read by this crate.
+
 ## PR #243 — service: add dependent_services
 **2026-07-24** · [#243](https://github.com/baileyrd/rusty_win32/pull/243)
 

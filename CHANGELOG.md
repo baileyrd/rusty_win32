@@ -5,6 +5,16 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `net` module (new subsystem): `net::startup`/`net::cleanup`
+  (`WSAStartup`/`WSACleanup`) — Winsock's own load/unload lifecycle, the
+  one primitive with no POSIX/`rusty_libc` analog (every other Winsock
+  call is documented undefined behavior before a matching `WSAStartup`
+  or after `WSACleanup`). Windows reference-counts nested calls
+  internally, so no shared guard/RAII type is needed. Previously
+  excluded by this crate's own non-goals, now in scope per explicit
+  round-2 direction — first piece of basic TCP/UDP client+server socket
+  programming, the same core subset `rusty_libc` wraps for POSIX
+  sockets.
 - `service::dependent_services` (`EnumDependentServicesW`) plus
   `DependentService`/`ServiceState`/`SERVICE_ENUMERATE_DEPENDENTS` —
   list every service depending on a given one, the "will stopping this
