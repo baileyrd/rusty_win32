@@ -5,6 +5,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `net::resolve` (`getaddrinfo`/`freeaddrinfo`) plus `AddrInfoHints`/
+  `ResolvedAddr` — hostname/service-name to address resolution, walking
+  Windows' own `addrinfo` linked list and copying every entry out before
+  freeing it. Accepts numeric or real host/service names; entries with
+  an address family/socket type/protocol this module doesn't support are
+  silently skipped rather than erroring the whole call.
 - `net::local_addr`/`net::peer_addr` (`getsockname`/`getpeername`) —
   read back a socket's own bound address (e.g. after binding an
   ephemeral port `0`) and a connected socket's peer address, reusing the
