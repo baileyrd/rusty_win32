@@ -89,6 +89,11 @@ unsafe extern "system" {
     // `get_sockopt` wrapper functions -- no `#[link_name]` needed.
     fn setsockopt(sock: usize, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32;
     fn getsockopt(sock: usize, level: i32, optname: i32, optval: *mut u8, optlen: *mut i32) -> i32;
+    // No collision here either: the real symbols are `getsockname`/
+    // `getpeername`, distinct from this module's `local_addr`/
+    // `peer_addr` wrapper functions -- no `#[link_name]` needed.
+    fn getsockname(sock: usize, name: *mut u8, namelen: *mut i32) -> i32;
+    fn getpeername(sock: usize, name: *mut u8, namelen: *mut i32) -> i32;
 }
 
 /// `INVALID_SOCKET` — the sentinel `socket` returns on failure (real
@@ -849,6 +854,63 @@ pub unsafe fn get_sockopt(
     })
 }
 
+/// Read back a socket's own local bound address — `getsockname`. Useful
+/// after [`bind`]-ing to port `0` (an OS-assigned ephemeral port) to
+/// discover which port was actually chosen.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid, already-[`bind`]-ed socket
+/// from [`socket`].
+pub unsafe fn local_addr(sock: RawSocket) -> Result<SocketAddr, crate::error::Win32Error> {
+    let mut buf = [0u8; 28];
+    let mut addr_len: i32 = buf.len() as i32;
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `buf` is a valid buffer matched by `addr_len` naming its
+    // exact capacity.
+    let ok = unsafe { getsockname(sock, buf.as_mut_ptr(), &mut addr_len) };
+    if ok != 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        return Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ));
+    }
+    // SAFETY: a successful `getsockname` guarantees `buf` was filled with
+    // `addr_len` valid bytes naming the local `sockaddr_in`/
+    // `sockaddr_in6`.
+    unsafe { from_sockaddr(buf.as_ptr(), addr_len) }
+}
+
+/// Read a connected socket's peer address — `getpeername`.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid, connected socket (a
+/// [`SocketKind::Stream`] socket from [`accept`]/after [`connect`], or a
+/// [`SocketKind::Dgram`] socket with a default peer set via [`connect`]).
+pub unsafe fn peer_addr(sock: RawSocket) -> Result<SocketAddr, crate::error::Win32Error> {
+    let mut buf = [0u8; 28];
+    let mut addr_len: i32 = buf.len() as i32;
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `buf` is a valid buffer matched by `addr_len` naming its
+    // exact capacity.
+    let ok = unsafe { getpeername(sock, buf.as_mut_ptr(), &mut addr_len) };
+    if ok != 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        return Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ));
+    }
+    // SAFETY: a successful `getpeername` guarantees `buf` was filled with
+    // `addr_len` valid bytes naming the peer's `sockaddr_in`/
+    // `sockaddr_in6`.
+    unsafe { from_sockaddr(buf.as_ptr(), addr_len) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1391,6 +1453,108 @@ mod tests {
         // yet.
         unsafe { close_socket(sock) }
             .expect("closesocket should succeed on a freshly created socket");
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn local_addr_reports_the_bound_port_after_binding_to_an_ephemeral_port() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let sock = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating a TCP/IPv4 socket");
+        let addr = SocketAddr::V4 {
+            ip: [127, 0, 0, 1],
+            // Port 0 asks Windows to assign any free ephemeral port --
+            // this test verifies local_addr can discover which one was
+            // actually chosen.
+            port: 0,
+        };
+        // SAFETY: `sock` was just created above and hasn't been closed
+        // yet.
+        unsafe { bind(sock, &addr) }.expect("bind should succeed on 127.0.0.1:0");
+
+        // SAFETY: `sock` is still open, now bound.
+        let bound =
+            unsafe { local_addr(sock) }.expect("local_addr should succeed on a bound socket");
+        match bound {
+            SocketAddr::V4 { ip, port } => {
+                assert_eq!(ip, [127, 0, 0, 1], "the bound address should be loopback");
+                assert_ne!(
+                    port, 0,
+                    "local_addr should report the OS-assigned ephemeral port, not 0"
+                );
+            }
+            SocketAddr::V6 { .. } => panic!("expected an IPv4 local address, got: {bound:?}"),
+        }
+
+        // SAFETY: `sock` was just created above and hasn't been closed
+        // yet.
+        unsafe { close_socket(sock) }
+            .expect("closesocket should succeed on a freshly created socket");
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn peer_addr_reports_the_connected_peers_address() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let server = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating the server's TCP/IPv4 socket");
+        const TEST_PORT: u16 = 47956;
+        let addr = SocketAddr::V4 {
+            ip: [127, 0, 0, 1],
+            port: TEST_PORT,
+        };
+        // SAFETY: `server` was just created above and hasn't been closed
+        // yet.
+        unsafe { bind(server, &addr) }.expect("bind should succeed on 127.0.0.1:TEST_PORT");
+        // SAFETY: `server` is still open, now bound.
+        unsafe { listen(server, 1) }
+            .expect("listen should succeed on the freshly bound server socket");
+
+        let accept_thread = std::thread::spawn(move || {
+            // SAFETY: `server` is open and listening from the calls
+            // above, for the whole lifetime of this thread.
+            unsafe { accept(server) }
+        });
+
+        let client = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating the client's TCP/IPv4 socket");
+        // SAFETY: `client` was just created above and hasn't been closed
+        // yet.
+        unsafe { connect(client, &addr) }
+            .expect("connect should succeed reaching the listening server socket");
+
+        let (accepted, _peer) = accept_thread
+            .join()
+            .expect("the accept thread should not panic")
+            .expect("accept should succeed once the client connects");
+
+        // SAFETY: `client` is connected from the call above.
+        let client_peer =
+            unsafe { peer_addr(client) }.expect("peer_addr should succeed on a connected socket");
+        assert_eq!(
+            client_peer, addr,
+            "the client's peer address should be the server's bound address"
+        );
+
+        // SAFETY: `accepted` is bound (inheriting the listening socket's
+        // local address) from `accept` above.
+        let accepted_local = unsafe { local_addr(accepted) }
+            .expect("local_addr should succeed on the accepted socket");
+        assert_eq!(
+            accepted_local, addr,
+            "the accepted socket's local address should match the listening socket's bound address"
+        );
+
+        // SAFETY: `client`/`accepted`/`server` were all just
+        // created/opened above and haven't been closed yet.
+        unsafe { close_socket(client) }.expect("closesocket should succeed on the client socket");
+        unsafe { close_socket(accepted) }
+            .expect("closesocket should succeed on the accepted socket");
+        unsafe { close_socket(server) }.expect("closesocket should succeed on the server socket");
 
         cleanup().expect("WSACleanup should succeed matching the startup call above");
     }
