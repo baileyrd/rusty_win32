@@ -622,13 +622,21 @@ pub unsafe fn spawn_suspended_with_pseudoconsole(
 
     let mut attribute_list = crate::conpty::AttributeList::init(1)?;
     // SAFETY: `hpc` is caller-supplied per this function's own safety
-    // contract and stays alive, unmoved, for the rest of this function --
-    // well past this call and past `CreateProcessW` below, which is the
-    // only place Windows actually reads the bound value.
+    // contract. For `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` specifically,
+    // Windows' own documented usage (and its official ConPTY sample)
+    // passes the `HPCON` handle's own pointer-sized *value* directly as
+    // `lpValue` -- not `&hpc`, a pointer to a local holding that value.
+    // Passing `&hpc` compiles and type-checks identically (both are
+    // `*const c_void`-shaped) but is a real, silent bug: it binds the
+    // address of this function's own stack slot instead of the handle
+    // itself, so the spawned child gets a bogus pseudoconsole reference
+    // and fails during its own console-subsystem startup
+    // (`STATUS_DLL_INIT_FAILED`, confirmed by this function's own test
+    // failing exactly that way before this was fixed).
     unsafe {
         attribute_list.update(
             crate::conpty::PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-            (&hpc as *const crate::conpty::Hpcon).cast(),
+            hpc.cast_const(),
             core::mem::size_of::<crate::conpty::Hpcon>(),
         )
     }?;

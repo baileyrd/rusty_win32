@@ -9,6 +9,19 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 ## PR #259 — process: add spawn_suspended_with_pseudoconsole
 **2026-07-24** · [#259](https://github.com/baileyrd/rusty_win32/pull/259)
 
+- **Fixed:** CI caught a real bug in this same PR's first push: the
+  `AttributeList::update` call binding `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`
+  passed `&hpc` (the address of the local `Hpcon` variable) instead of
+  `hpc` itself (the handle's own pointer-sized value). Both compile and
+  type-check identically (`*const c_void`-shaped either way), so nothing
+  caught it locally — the spawned `cmd.exe /c exit 7` child ran but
+  failed its own console-subsystem startup with `STATUS_DLL_INIT_FAILED`
+  (`0xC0000142`), reported as its real exit code by the test's own
+  `wait` call. Windows' documented usage for this one attribute (and its
+  official ConPTY sample) passes the `HPCON` value directly as
+  `lpValue`, unlike most other process-thread attributes which take a
+  pointer to a variable holding the value — fixed by passing
+  `hpc.cast_const()` instead of `(&hpc as *const Hpcon).cast()`.
 - **Added:** `process::spawn_suspended_with_pseudoconsole` plus
   `StartupInfoExW`/`EXTENDED_STARTUPINFO_PRESENT`, closing issue #189 —
   a wholly new function alongside `process::spawn_suspended` (verified
