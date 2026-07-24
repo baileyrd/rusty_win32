@@ -6,6 +6,20 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #249 — net: add connect
+**2026-07-24** · [#249](https://github.com/baileyrd/rusty_win32/pull/249)
+
+- **Added:** `net::connect` (`connect`), closing issue #178 — TCP client
+  connect, or fix a UDP socket's default peer for future `send`/`recv`
+  calls. Same lowercase-symbol collision as `socket`/`bind`/`listen`/
+  `accept` — bound via `#[link_name = "connect"]` on a distinctly-named
+  `raw_connect` extern. Tested with a fully self-contained local TCP
+  handshake using only this crate's own primitives on both ends
+  (`bind`/`listen`/`accept` on one thread, `socket`/`connect` on the
+  main thread) — the first `net` test that no longer needs
+  `std::net::TcpStream` as a stand-in client, now that this crate has
+  its own `connect`.
+
 ## PR #248 — net: add accept
 **2026-07-24** · [#248](https://github.com/baileyrd/rusty_win32/pull/248)
 

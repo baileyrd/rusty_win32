@@ -45,6 +45,11 @@ unsafe extern "system" {
     // wrapper function.
     #[link_name = "accept"]
     fn raw_accept(sock: usize, addr: *mut u8, addrlen: *mut i32) -> usize;
+    // Same lowercase-symbol collision as `socket`/`bind`/`listen`/`accept`
+    // above -- `connect` would otherwise clash with this module's own
+    // `connect` wrapper function.
+    #[link_name = "connect"]
+    fn raw_connect(sock: usize, name: *const u8, namelen: i32) -> i32;
 }
 
 /// `INVALID_SOCKET` — the sentinel `socket` returns on failure (real
@@ -464,6 +469,34 @@ pub unsafe fn accept(sock: RawSocket) -> Result<(RawSocket, SocketAddr), crate::
     Ok((new_sock, peer))
 }
 
+/// TCP client connect, or fix a UDP socket's default peer — `connect`.
+/// For a [`SocketKind::Stream`] socket this actively opens a TCP
+/// connection to `addr` (blocking until it succeeds or fails); for a
+/// [`SocketKind::Dgram`] socket it doesn't send anything on the wire,
+/// just records `addr` as the default destination [`crate::net`]'s
+/// future `send`/`recv` (rather than `sendto`/`recvfrom`) calls use.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid socket from [`socket`].
+pub unsafe fn connect(sock: RawSocket, addr: &SocketAddr) -> Result<(), crate::error::Win32Error> {
+    let raw = to_sockaddr(addr);
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `raw` is a valid `sockaddr`-shaped buffer with `raw.len()`
+    // naming its exact encoded length.
+    let ok = unsafe { raw_connect(sock, raw.as_ptr(), raw.len()) };
+    if ok != 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,6 +691,64 @@ mod tests {
         unsafe { close_socket(new_sock) }
             .expect("closesocket should succeed on the accepted socket");
         unsafe { close_socket(sock) }.expect("closesocket should succeed on the listening socket");
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn connect_then_accept_completes_a_full_local_tcp_handshake() {
+        // Unlike `accept_returns_a_connected_socket_and_the_peers_address`
+        // (which needed `std::net::TcpStream` as a stand-in client since
+        // this crate had no `connect` yet), this test uses only this
+        // crate's own primitives on both ends of the connection.
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let server = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating the server's TCP/IPv4 socket");
+        const TEST_PORT: u16 = 47951;
+        let addr = SocketAddr::V4 {
+            ip: [127, 0, 0, 1],
+            port: TEST_PORT,
+        };
+        // SAFETY: `server` was just created above and hasn't been closed
+        // yet.
+        unsafe { bind(server, &addr) }.expect("bind should succeed on 127.0.0.1:TEST_PORT");
+        // SAFETY: `server` is still open, now bound.
+        unsafe { listen(server, 1) }
+            .expect("listen should succeed on the freshly bound server socket");
+
+        // `accept` blocks until a connection arrives, so it runs on a
+        // background thread while the client connects below.
+        let accept_thread = std::thread::spawn(move || {
+            // SAFETY: `server` is open and listening from the calls
+            // above, for the whole lifetime of this thread.
+            unsafe { accept(server) }
+        });
+
+        let client = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating the client's TCP/IPv4 socket");
+        // SAFETY: `client` was just created above and hasn't been closed
+        // yet.
+        unsafe { connect(client, &addr) }
+            .expect("connect should succeed reaching the listening server socket");
+
+        let (accepted, peer) = accept_thread
+            .join()
+            .expect("the accept thread should not panic")
+            .expect("accept should succeed once the client connects");
+        match peer {
+            SocketAddr::V4 { ip, .. } => {
+                assert_eq!(ip, [127, 0, 0, 1], "the peer's address should be loopback")
+            }
+            SocketAddr::V6 { .. } => panic!("expected an IPv4 peer address, got: {peer:?}"),
+        }
+
+        // SAFETY: `client`/`accepted`/`server` were all just
+        // created/opened above and haven't been closed yet.
+        unsafe { close_socket(client) }.expect("closesocket should succeed on the client socket");
+        unsafe { close_socket(accepted) }
+            .expect("closesocket should succeed on the accepted socket");
+        unsafe { close_socket(server) }.expect("closesocket should succeed on the server socket");
 
         cleanup().expect("WSACleanup should succeed matching the startup call above");
     }
