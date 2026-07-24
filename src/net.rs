@@ -35,6 +35,11 @@ unsafe extern "system" {
     // otherwise clash with this module's own `bind` wrapper function.
     #[link_name = "bind"]
     fn raw_bind(sock: usize, name: *const u8, namelen: i32) -> i32;
+    // Same lowercase-symbol collision as `socket`/`bind` above -- `listen`
+    // would otherwise clash with this module's own `listen` wrapper
+    // function.
+    #[link_name = "listen"]
+    fn raw_listen(sock: usize, backlog: i32) -> i32;
 }
 
 /// `INVALID_SOCKET` — the sentinel `socket` returns on failure (real
@@ -404,6 +409,32 @@ pub unsafe fn bind(sock: RawSocket, addr: &SocketAddr) -> Result<(), crate::erro
     }
 }
 
+/// Mark a bound TCP socket passive/listening — `listen`, needed before
+/// [`socket`]'s result (already [`bind`]-ed) can accept incoming
+/// connections. `backlog` is the maximum length of the pending-
+/// connection queue, passed through to `listen` unmodified — this crate
+/// applies no policy (e.g. clamping) to it.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid, already-[`bind`]-ed
+/// [`SocketKind::Stream`] socket from [`socket`].
+pub unsafe fn listen(sock: RawSocket, backlog: i32) -> Result<(), crate::error::Win32Error> {
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `backlog` is a plain integer, not a pointer.
+    let ok = unsafe { raw_listen(sock, backlog) };
+    if ok != 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,5 +551,32 @@ mod tests {
         let err = unsafe { from_sockaddr(bytes.as_ptr(), bytes.len() as i32) }
             .expect_err("from_sockaddr should fail for an unrecognized address family");
         assert_eq!(err, crate::error::Win32Error::ERROR_INVALID_PARAMETER);
+    }
+
+    #[test]
+    fn bind_then_listen_succeeds_on_a_loopback_tcp_socket() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let sock = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating a TCP/IPv4 socket");
+        let addr = SocketAddr::V4 {
+            ip: [127, 0, 0, 1],
+            // Port 0 asks Windows to assign any free ephemeral port --
+            // this test only needs bind/listen to succeed, not a
+            // specific port number.
+            port: 0,
+        };
+        // SAFETY: `sock` was just created above and hasn't been closed
+        // yet.
+        unsafe { bind(sock, &addr) }.expect("bind should succeed on 127.0.0.1:0");
+        // SAFETY: `sock` is still open, now bound.
+        unsafe { listen(sock, 5) }.expect("listen should succeed on a freshly bound TCP socket");
+
+        // SAFETY: `sock` was just created above and hasn't been closed
+        // yet.
+        unsafe { close_socket(sock) }
+            .expect("closesocket should succeed on a freshly created socket");
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
     }
 }
