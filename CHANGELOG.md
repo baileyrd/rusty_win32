@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `net::accept` (`accept`) — accept one incoming TCP connection,
+  returning a new connected socket plus the peer's address. The first
+  real (non-test) caller of `from_sockaddr`.
 - `net::listen` (`listen`) — mark a bound TCP socket passive/listening,
   needed before it can accept incoming connections.
 - `SocketAddr` (`V4`/`V6`) plus `to_sockaddr`/`from_sockaddr` conversions
