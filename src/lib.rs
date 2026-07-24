@@ -351,3 +351,12 @@ pub mod security;
 // `rusty_win32::service::*`.
 #[cfg(windows)]
 pub mod service;
+
+// `net` is a fourth brand-new round-2 subsystem (same previously-
+// excluded-by-non-goals history as `registry`/`security`/`service`) —
+// basic TCP/UDP client+server socket programming, the same core subset
+// `rusty_libc` wraps for POSIX sockets. Starts with Winsock's own
+// load/unload lifecycle. Not re-exported at the crate root, for the same
+// reason as the others above — reach it via `rusty_win32::net::*`.
+#[cfg(windows)]
+pub mod net;
