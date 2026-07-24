@@ -5,6 +5,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `service::control` (`ControlService`) plus `ServiceControl`
+  (`Stop`/`Pause`/`Continue`/`Interrogate`) and `SERVICE_INTERROGATE` —
+  send a stop/pause/continue/interrogate control to a running service.
+  Discards `ControlService`'s own immediate status out-parameter (it
+  only reports the state at the instant of the call, often not yet
+  settled) — a caller polls `status` afterward instead, the same
+  poll-don't-block shape `job::process_ids` already uses.
 - `service::start` (`StartServiceW`) plus `SERVICE_START` — start an
   already-installed service, the zero-argument case only
   (`lpServiceArgVectors` only matters for driver-style services, out of

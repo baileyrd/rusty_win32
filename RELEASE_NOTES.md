@@ -6,6 +6,23 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #240 — service: add control
+**2026-07-24** · [#240](https://github.com/baileyrd/rusty_win32/pull/240)
+
+- **Added:** `service::control` (`ControlService`) plus `ServiceControl`
+  (`Stop`/`Pause`/`Continue`/`Interrogate`) and `SERVICE_INTERROGATE`,
+  closing issue #169 — send a stop/pause/continue/interrogate control to
+  a running service, one `dwControl`-selected call. Deliberately
+  discards `ControlService`'s own `lpServiceStatus` out-parameter (kept
+  as a private, unexposed `ServiceStatusRaw` FFI mirror of the older,
+  pid-less `SERVICE_STATUS` struct) rather than returning it: the
+  immediate status only reflects the instant of the call (often still
+  `_PENDING`, not settled), so a caller polls PR #238's `status`
+  afterward instead — the same poll-don't-block shape
+  `job::process_ids` already uses. Tested non-destructively: `Interrogate`
+  never changes a service's state, so exercising it against the
+  well-known "EventLog" service leaves the machine untouched.
+
 ## PR #239 — service: add start
 **2026-07-23** · [#239](https://github.com/baileyrd/rusty_win32/pull/239)
 
