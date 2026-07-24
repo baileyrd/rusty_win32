@@ -6,6 +6,27 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #253 — net: add sockopt
+**2026-07-24** · [#253](https://github.com/baileyrd/rusty_win32/pull/253)
+
+- **Added:** `net::set_sockopt`/`net::get_sockopt` (`setsockopt`/
+  `getsockopt`) plus `SockOpt`/`SockOptKind`/`SockOptValue`, closing
+  issue #182 — `SO_REUSEADDR`, `SO_RCVTIMEO`/`SO_SNDTIMEO`, `TCP_NODELAY`
+  (`IPPROTO_TCP` level, reusing the already-verified `Protocol::Tcp = 6`
+  value), and `SO_ERROR`. Unlike `socket`/`bind`/`listen`/etc., the real
+  symbols `setsockopt`/`getsockopt` (no underscore) don't collide with
+  this module's `set_sockopt`/`get_sockopt` wrapper names, so no
+  `#[link_name]` was needed here. Deliberately no `timeval`-shaped
+  option: Windows' `SO_RCVTIMEO`/`SO_SNDTIMEO` take a plain millisecond
+  `DWORD` directly, unlike POSIX — documented on `SockOpt::RecvTimeout`/
+  `SendTimeout`. Every option this module supports is a 4-byte
+  `BOOL`/`DWORD` on the wire, so `set_sockopt`/`get_sockopt` share one
+  fixed-size buffer rather than a per-option size. `SOL_SOCKET`/
+  `SO_REUSEADDR`/`SO_RCVTIMEO`/`SO_SNDTIMEO`/`SO_ERROR`/`TCP_NODELAY`
+  verified via a compiled mingw-w64 probe. Tested each option's
+  set-then-get round trip on a freshly created socket, plus `SO_ERROR`
+  reporting `0` on a healthy, never-failed socket.
+
 ## PR #252 — net: add shutdown
 **2026-07-24** · [#252](https://github.com/baileyrd/rusty_win32/pull/252)
 

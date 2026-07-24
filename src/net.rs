@@ -84,6 +84,11 @@ unsafe extern "system" {
     // module's own `shutdown` wrapper function.
     #[link_name = "shutdown"]
     fn raw_shutdown(sock: usize, how: i32) -> i32;
+    // No collision here: the real symbols are `setsockopt`/`getsockopt`
+    // (no underscore), distinct from this module's `set_sockopt`/
+    // `get_sockopt` wrapper functions -- no `#[link_name]` needed.
+    fn setsockopt(sock: usize, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32;
+    fn getsockopt(sock: usize, level: i32, optname: i32, optval: *mut u8, optlen: *mut i32) -> i32;
 }
 
 /// `INVALID_SOCKET` — the sentinel `socket` returns on failure (real
@@ -712,6 +717,138 @@ pub unsafe fn shutdown(sock: RawSocket, how: ShutdownHow) -> Result<(), crate::e
     }
 }
 
+/// `SOL_SOCKET` — the socket-level option level [`set_sockopt`]/
+/// [`get_sockopt`] use for every option except [`SockOpt::TcpNoDelay`]/
+/// [`SockOptKind::TcpNoDelay`] (which is `IPPROTO_TCP`-level instead).
+/// Verified against mingw-w64's own `winsock2.h` with a compiled
+/// `_Static_assert` probe.
+const SOL_SOCKET: i32 = 0xffff;
+
+/// `SO_REUSEADDR`/`SO_RCVTIMEO`/`SO_SNDTIMEO`/`SO_ERROR` — the
+/// `SOL_SOCKET`-level option numbers this module supports. Verified
+/// against mingw-w64's own `winsock2.h` with a compiled `_Static_assert`
+/// probe.
+const SO_REUSEADDR: i32 = 0x0004;
+const SO_RCVTIMEO: i32 = 0x1006;
+const SO_SNDTIMEO: i32 = 0x1005;
+const SO_ERROR: i32 = 0x1007;
+
+/// `TCP_NODELAY` — the one `IPPROTO_TCP`-level option this module
+/// supports. Verified against mingw-w64's own `winsock2.h` with a
+/// compiled `_Static_assert` probe.
+const TCP_NODELAY: i32 = 0x0001;
+
+/// An option settable via [`set_sockopt`]. Every variant here is a plain
+/// 4-byte `BOOL`/`DWORD` on the wire, unlike POSIX's `timeval`-based
+/// `SO_RCVTIMEO`/`SO_SNDTIMEO` — Windows takes a plain millisecond
+/// `DWORD` for both instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SockOpt {
+    /// `SO_REUSEADDR` — allow [`bind`] to succeed on a local
+    /// address/port still lingering in `TIME_WAIT` from a previous
+    /// socket.
+    ReuseAddr(bool),
+    /// `SO_RCVTIMEO` — the blocking-[`recv`]/[`recvfrom`] timeout, in
+    /// milliseconds. `0` (the default) means block forever.
+    RecvTimeout(u32),
+    /// `SO_SNDTIMEO` — the blocking-[`send`]/[`sendto`] timeout, in
+    /// milliseconds. `0` (the default) means block forever.
+    SendTimeout(u32),
+    /// `TCP_NODELAY` (`IPPROTO_TCP` level) — disable Nagle's algorithm,
+    /// so small writes go out immediately instead of being batched.
+    TcpNoDelay(bool),
+}
+
+/// Which option [`get_sockopt`] reports — see [`SockOptValue`] for what
+/// each kind returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SockOptKind {
+    ReuseAddr,
+    RecvTimeout,
+    SendTimeout,
+    TcpNoDelay,
+    /// `SO_ERROR` — the socket's pending error status. Reading it also
+    /// clears it (a Winsock-documented side effect of this particular
+    /// option, not something this crate adds).
+    Error,
+}
+
+/// [`get_sockopt`]'s result — the value's shape depends on which
+/// [`SockOptKind`] was queried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SockOptValue {
+    Bool(bool),
+    Millis(u32),
+    ErrorCode(i32),
+}
+
+/// Set a socket option — `setsockopt`.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid socket from [`socket`].
+pub unsafe fn set_sockopt(sock: RawSocket, opt: SockOpt) -> Result<(), crate::error::Win32Error> {
+    let (level, optname, bytes): (i32, i32, [u8; 4]) = match opt {
+        SockOpt::ReuseAddr(on) => (SOL_SOCKET, SO_REUSEADDR, (on as i32).to_ne_bytes()),
+        SockOpt::RecvTimeout(ms) => (SOL_SOCKET, SO_RCVTIMEO, ms.to_ne_bytes()),
+        SockOpt::SendTimeout(ms) => (SOL_SOCKET, SO_SNDTIMEO, ms.to_ne_bytes()),
+        SockOpt::TcpNoDelay(on) => (Protocol::Tcp as i32, TCP_NODELAY, (on as i32).to_ne_bytes()),
+    };
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `bytes` is a valid 4-byte buffer, matching the
+    // `BOOL`/`DWORD` width every option above uses, with its exact
+    // length passed as `optlen`.
+    let ok = unsafe { setsockopt(sock, level, optname, bytes.as_ptr(), bytes.len() as i32) };
+    if ok != 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Read a socket option — `getsockopt`.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid socket from [`socket`].
+pub unsafe fn get_sockopt(
+    sock: RawSocket,
+    kind: SockOptKind,
+) -> Result<SockOptValue, crate::error::Win32Error> {
+    let (level, optname) = match kind {
+        SockOptKind::ReuseAddr => (SOL_SOCKET, SO_REUSEADDR),
+        SockOptKind::RecvTimeout => (SOL_SOCKET, SO_RCVTIMEO),
+        SockOptKind::SendTimeout => (SOL_SOCKET, SO_SNDTIMEO),
+        SockOptKind::TcpNoDelay => (Protocol::Tcp as i32, TCP_NODELAY),
+        SockOptKind::Error => (SOL_SOCKET, SO_ERROR),
+    };
+    let mut bytes = [0u8; 4];
+    let mut optlen: i32 = bytes.len() as i32;
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `bytes` is a valid 4-byte buffer matched by `optlen`
+    // naming its exact capacity.
+    let ok = unsafe { getsockopt(sock, level, optname, bytes.as_mut_ptr(), &mut optlen) };
+    if ok != 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        return Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ));
+    }
+    let raw = i32::from_ne_bytes(bytes);
+    Ok(match kind {
+        SockOptKind::ReuseAddr | SockOptKind::TcpNoDelay => SockOptValue::Bool(raw != 0),
+        SockOptKind::RecvTimeout | SockOptKind::SendTimeout => SockOptValue::Millis(raw as u32),
+        SockOptKind::Error => SockOptValue::ErrorCode(raw),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1157,6 +1294,103 @@ mod tests {
         unsafe { close_socket(accepted) }
             .expect("closesocket should succeed on the accepted socket");
         unsafe { close_socket(server) }.expect("closesocket should succeed on the server socket");
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn set_sockopt_reuse_addr_then_get_sockopt_round_trips() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let sock = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating a TCP/IPv4 socket");
+
+        // SAFETY: `sock` was just created above and hasn't been closed
+        // yet.
+        unsafe { set_sockopt(sock, SockOpt::ReuseAddr(true)) }
+            .expect("set_sockopt(ReuseAddr(true)) should succeed");
+        // SAFETY: `sock` is still open from the call above.
+        let value = unsafe { get_sockopt(sock, SockOptKind::ReuseAddr) }
+            .expect("get_sockopt(ReuseAddr) should succeed");
+        assert_eq!(value, SockOptValue::Bool(true));
+
+        // SAFETY: `sock` was just created above and hasn't been closed
+        // yet.
+        unsafe { close_socket(sock) }
+            .expect("closesocket should succeed on a freshly created socket");
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn set_sockopt_tcp_nodelay_then_get_sockopt_round_trips() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let sock = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating a TCP/IPv4 socket");
+
+        // SAFETY: `sock` was just created above and hasn't been closed
+        // yet.
+        unsafe { set_sockopt(sock, SockOpt::TcpNoDelay(true)) }
+            .expect("set_sockopt(TcpNoDelay(true)) should succeed");
+        // SAFETY: `sock` is still open from the call above.
+        let value = unsafe { get_sockopt(sock, SockOptKind::TcpNoDelay) }
+            .expect("get_sockopt(TcpNoDelay) should succeed");
+        assert_eq!(value, SockOptValue::Bool(true));
+
+        // SAFETY: `sock` was just created above and hasn't been closed
+        // yet.
+        unsafe { close_socket(sock) }
+            .expect("closesocket should succeed on a freshly created socket");
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn set_sockopt_recv_timeout_then_get_sockopt_round_trips_in_milliseconds() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let sock = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating a TCP/IPv4 socket");
+
+        // SAFETY: `sock` was just created above and hasn't been closed
+        // yet.
+        unsafe { set_sockopt(sock, SockOpt::RecvTimeout(250)) }
+            .expect("set_sockopt(RecvTimeout(250)) should succeed");
+        // SAFETY: `sock` is still open from the call above.
+        let value = unsafe { get_sockopt(sock, SockOptKind::RecvTimeout) }
+            .expect("get_sockopt(RecvTimeout) should succeed");
+        assert_eq!(
+            value,
+            SockOptValue::Millis(250),
+            "SO_RCVTIMEO should round-trip as a plain millisecond DWORD, not a timeval"
+        );
+
+        // SAFETY: `sock` was just created above and hasn't been closed
+        // yet.
+        unsafe { close_socket(sock) }
+            .expect("closesocket should succeed on a freshly created socket");
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn get_sockopt_error_reports_zero_for_a_healthy_socket() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let sock = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating a TCP/IPv4 socket");
+
+        // SAFETY: `sock` was just created above and hasn't been closed
+        // yet.
+        let value = unsafe { get_sockopt(sock, SockOptKind::Error) }
+            .expect("get_sockopt(Error) should succeed on a healthy socket");
+        assert_eq!(value, SockOptValue::ErrorCode(0));
+
+        // SAFETY: `sock` was just created above and hasn't been closed
+        // yet.
+        unsafe { close_socket(sock) }
+            .expect("closesocket should succeed on a freshly created socket");
 
         cleanup().expect("WSACleanup should succeed matching the startup call above");
     }
