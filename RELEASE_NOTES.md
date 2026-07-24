@@ -6,6 +6,34 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #246 — net: add SocketAddr/sockaddr plumbing + bind
+**2026-07-24** · [#246](https://github.com/baileyrd/rusty_win32/pull/246)
+
+- **Added:** `SocketAddr` (`V4`/`V6`) plus `to_sockaddr`/`from_sockaddr`
+  conversions and the verified `sockaddr_in`/`sockaddr_in6` wire-format
+  layouts (16 and 28 bytes, field-by-field verified against mingw-w64's
+  own `psdk_inc/_ip_types.h`/`ws2ipdef.h`), closing issue #185 — the
+  shared `{ip, port}` address representation every address-taking `net`
+  function needs. `ip` octets are stored exactly as they appear on the
+  wire (no endian conversion needed); only `port` is byte-swapped to/from
+  network byte order internally.
+- `net::bind` (`bind`), closing issue #175 — attach a local address/port
+  to a socket.
+- **Note:** #185 was implemented ahead of its filed order (before #175
+  through #184) because issue #175's own literal signature
+  (`bind(sock, addr: &SocketAddr)`) already required it — implementing
+  #175 in isolation wasn't possible without first building the
+  `SocketAddr` plumbing #185 owns. Rather than duplicate that work or
+  invent a throwaway stand-in, this PR builds both together and closes
+  both issues. `from_sockaddr` has no non-test caller yet (its real
+  callers — `accept`/`recvfrom`/`local_addr`/`peer_addr` — are later
+  round-2 items), so it carries a documented `#[allow(dead_code)]` until
+  those land. The lowercase Win32/BSD-sockets symbol `bind` again
+  collides with this crate's own `net::bind` wrapper (the same issue
+  PR #245's `socket` hit) — bound via `#[link_name = "bind"]` on a
+  distinctly-named `raw_bind` extern, matching that PR's established
+  pattern.
+
 ## PR #245 — net: add socket/close_socket
 **2026-07-24** · [#245](https://github.com/baileyrd/rusty_win32/pull/245)
 
