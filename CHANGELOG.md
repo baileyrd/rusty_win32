@@ -5,6 +5,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `process::spawn_suspended_with_pseudoconsole` plus `StartupInfoExW`/
+  `EXTENDED_STARTUPINFO_PRESENT` — a wholly new function alongside
+  `process::spawn_suspended` (non-breaking) that starts a command
+  suspended, hosted by an already-created pseudoconsole, for a fully-
+  interactive child rather than one with redirected stdio pipes. This
+  closes out the `conpty` module's round-2 scope, and with it this
+  entire round-2 parity-loop batch.
 - `conpty::AttributeList` (`InitializeProcThreadAttributeList`/
   `UpdateProcThreadAttribute`/`DeleteProcThreadAttributeList`) — the
   generic extended-process-attribute mechanism `CreateProcessW` reads to

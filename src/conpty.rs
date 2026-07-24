@@ -267,6 +267,13 @@ impl AttributeList {
         }
     }
 
+    /// The raw `PROC_THREAD_ATTRIBUTE_LIST` pointer, ready to embed in a
+    /// `STARTUPINFOEXW.lpAttributeList` field —
+    /// `process::spawn_suspended_with_pseudoconsole`'s own use.
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.buffer.as_mut_ptr()
+    }
+
     /// Tear down this attribute list — `DeleteProcThreadAttributeList`.
     /// Idempotent: a second call (or the [`Drop`] impl running after an
     /// explicit call here) is a no-op, not a double-free.
