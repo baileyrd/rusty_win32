@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `net::shutdown` (`shutdown`) plus `ShutdownHow` (`Receive`/`Send`/`Both`)
+  — half-close a connected socket's send and/or receive direction without
+  invalidating the handle itself, unlike `close_socket`. Lets a TCP client
+  signal end-of-stream to its peer while still able to `recv` any
+  in-flight reply.
 - `net::sendto`/`net::recvfrom` (`sendto`/`recvfrom`) — connectionless
   datagram I/O, the bare UDP round trip, marshaling a
   `sockaddr_in`/`sockaddr_in6` address (via the existing

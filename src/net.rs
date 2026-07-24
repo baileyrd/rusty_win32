@@ -79,6 +79,11 @@ unsafe extern "system" {
         from: *mut u8,
         fromlen: *mut i32,
     ) -> i32;
+    // Same lowercase-symbol collision as the rest of this module's
+    // BSD-socket wrappers -- `shutdown` would otherwise clash with this
+    // module's own `shutdown` wrapper function.
+    #[link_name = "shutdown"]
+    fn raw_shutdown(sock: usize, how: i32) -> i32;
 }
 
 /// `INVALID_SOCKET` — the sentinel `socket` returns on failure (real
@@ -669,6 +674,44 @@ pub unsafe fn recvfrom(
     Ok((received as usize, sender))
 }
 
+/// `SD_RECEIVE`/`SD_SEND`/`SD_BOTH` — which direction(s) [`shutdown`]
+/// closes. Verified against mingw-w64's own `winsock2.h` with a compiled
+/// `_Static_assert` probe.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownHow {
+    Receive = 0,
+    Send = 1,
+    Both = 2,
+}
+
+/// Half-close a TCP socket's send and/or receive direction — `shutdown`,
+/// for a clean FIN before [`close_socket`]. Unlike `close_socket`
+/// itself, this leaves `sock` open (still a valid handle, still needing
+/// its own eventual `close_socket`) — it only signals the peer that no
+/// more data is coming (`ShutdownHow::Send`), stops accepting further
+/// reads (`ShutdownHow::Receive`), or both.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid, connected socket.
+pub unsafe fn shutdown(sock: RawSocket, how: ShutdownHow) -> Result<(), crate::error::Win32Error> {
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `how` is a plain enum-backed integer value, not a
+    // pointer.
+    let ok = unsafe { raw_shutdown(sock, how as i32) };
+    if ok != 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1054,6 +1097,66 @@ mod tests {
         unsafe { close_socket(sender) }.expect("closesocket should succeed on the sender socket");
         unsafe { close_socket(receiver) }
             .expect("closesocket should succeed on the receiver socket");
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn shutdown_send_causes_the_peer_to_see_a_clean_end_of_stream() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let server = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating the server's TCP/IPv4 socket");
+        const TEST_PORT: u16 = 47955;
+        let addr = SocketAddr::V4 {
+            ip: [127, 0, 0, 1],
+            port: TEST_PORT,
+        };
+        // SAFETY: `server` was just created above and hasn't been closed
+        // yet.
+        unsafe { bind(server, &addr) }.expect("bind should succeed on 127.0.0.1:TEST_PORT");
+        // SAFETY: `server` is still open, now bound.
+        unsafe { listen(server, 1) }
+            .expect("listen should succeed on the freshly bound server socket");
+
+        let accept_thread = std::thread::spawn(move || {
+            // SAFETY: `server` is open and listening from the calls
+            // above, for the whole lifetime of this thread.
+            unsafe { accept(server) }
+        });
+
+        let client = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating the client's TCP/IPv4 socket");
+        // SAFETY: `client` was just created above and hasn't been closed
+        // yet.
+        unsafe { connect(client, &addr) }
+            .expect("connect should succeed reaching the listening server socket");
+
+        let (accepted, _peer) = accept_thread
+            .join()
+            .expect("the accept thread should not panic")
+            .expect("accept should succeed once the client connects");
+
+        // SAFETY: `client` is connected from the calls above.
+        unsafe { shutdown(client, ShutdownHow::Send) }
+            .expect("shutdown(Send) should succeed on the connected client socket");
+
+        let mut buf = [0u8; 16];
+        // SAFETY: `accepted` is a valid, connected socket from `accept`
+        // above.
+        let received = unsafe { recv(accepted, &mut buf) }
+            .expect("recv should succeed reading end-of-stream after the peer's shutdown(Send)");
+        assert_eq!(
+            received, 0,
+            "recv should report 0 bytes once the peer has shut down its send direction"
+        );
+
+        // SAFETY: `client`/`accepted`/`server` were all just
+        // created/opened above and haven't been closed yet.
+        unsafe { close_socket(client) }.expect("closesocket should succeed on the client socket");
+        unsafe { close_socket(accepted) }
+            .expect("closesocket should succeed on the accepted socket");
+        unsafe { close_socket(server) }.expect("closesocket should succeed on the server socket");
 
         cleanup().expect("WSACleanup should succeed matching the startup call above");
     }
