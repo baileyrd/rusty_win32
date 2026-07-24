@@ -22,9 +22,20 @@
 //! separate issue, folded in here since [`create`]'s own signature
 //! already needs the `Hpcon` type: the same real, signature-level
 //! dependency that combined `net::bind`/`SocketAddr` into one PR earlier
-//! in round 2). `InitializeProcThreadAttributeList`/
-//! `UpdateProcThreadAttribute`/`DeleteProcThreadAttributeList` and
-//! `process::spawn_suspended_with_pseudoconsole` are later round-2 items.
+//! in round 2).
+//!
+//! [`AttributeList`] rounds this module out with the generic (pre-
+//! ConPTY, Vista-era) extended-process-attribute mechanism — the only
+//! way to hand an `HPCON` to `CreateProcessW`. `PROC_THREAD_ATTRIBUTE_LIST`'s
+//! true size is knowable only at runtime, from a first, size-query-only
+//! call's own size-out — a query-then-allocate opaque-byte-buffer
+//! pattern, new territory for this crate, distinct from its existing
+//! "retry a UTF-16 string buffer at the size the API reports" idiom
+//! (e.g. [`crate::console::title`]).
+//! `process::spawn_suspended_with_pseudoconsole` is the last round-2 item.
+
+extern crate alloc;
+use alloc::vec::Vec;
 
 use crate::console::Coord;
 use crate::error::Win32Error;
@@ -149,6 +160,133 @@ pub unsafe fn close(hpc: Hpcon) {
     unsafe { ClosePseudoConsole(hpc) }
 }
 
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn InitializeProcThreadAttributeList(
+        attribute_list: *mut u8,
+        attribute_count: u32,
+        flags: u32,
+        size: *mut usize,
+    ) -> i32;
+    fn UpdateProcThreadAttribute(
+        attribute_list: *mut u8,
+        flags: u32,
+        attribute: usize,
+        value: *const core::ffi::c_void,
+        size: usize,
+        previous_value: *mut core::ffi::c_void,
+        return_size: *mut usize,
+    ) -> i32;
+    fn DeleteProcThreadAttributeList(attribute_list: *mut u8);
+}
+
+/// A `PROC_THREAD_ATTRIBUTE_LIST` — the generic (pre-ConPTY, Vista-era)
+/// extended-process-attribute mechanism `CreateProcessW` reads via
+/// `STARTUPINFOEXW.lpAttributeList`, the only way to hand it an
+/// [`Hpcon`] (via [`PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`]). Its true
+/// byte size is knowable only at runtime; [`init`](AttributeList::init)
+/// discovers it via a size-query-only first call before allocating the
+/// real buffer, an opaque-byte-buffer pattern Windows itself documents
+/// this two-call way (distinct from a *reported-size-was-wrong* retry
+/// loop like [`crate::service::display_name`]'s).
+pub struct AttributeList {
+    buffer: Vec<u8>,
+    deleted: bool,
+}
+
+impl AttributeList {
+    /// Allocate and initialize a new attribute list sized for
+    /// `attribute_count` entries — `InitializeProcThreadAttributeList`,
+    /// called once (ignoring its return value: passing a null attribute-
+    /// list pointer is documented as this function's own size-query
+    /// mode, which always reports failure this way purely to hand back
+    /// the real byte count) to discover the required buffer size, then
+    /// again on the freshly allocated buffer to do the real
+    /// initialization.
+    pub fn init(attribute_count: u32) -> Result<Self, Win32Error> {
+        let mut size: usize = 0;
+        // SAFETY: a null attribute-list pointer paired with a valid
+        // `size` out-pointer is `InitializeProcThreadAttributeList`'s
+        // documented size-query mode.
+        unsafe {
+            InitializeProcThreadAttributeList(core::ptr::null_mut(), attribute_count, 0, &mut size)
+        };
+
+        let mut buffer = alloc::vec![0u8; size];
+        // SAFETY: `buffer` is exactly `size` bytes, matching the size
+        // query above; this call does the real initialization.
+        let ok = unsafe {
+            InitializeProcThreadAttributeList(buffer.as_mut_ptr(), attribute_count, 0, &mut size)
+        };
+        if ok == 0 {
+            return Err(Win32Error::last());
+        }
+        Ok(AttributeList {
+            buffer,
+            deleted: false,
+        })
+    }
+
+    /// Set one attribute — `UpdateProcThreadAttribute`. `attribute` is
+    /// an attribute id such as [`PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`];
+    /// `value`/`size` describe the attribute's value bytes (e.g. an
+    /// [`Hpcon`] and its own `size_of`).
+    ///
+    /// # Safety
+    ///
+    /// `value` must point to `size` valid, readable bytes that stay
+    /// alive and unmoved for as long as this `AttributeList` is in use
+    /// by `CreateProcessW` (Windows stores the pointer, not a copy of
+    /// the bytes, until this list is consumed or deleted).
+    pub unsafe fn update(
+        &mut self,
+        attribute: usize,
+        value: *const core::ffi::c_void,
+        size: usize,
+    ) -> Result<(), Win32Error> {
+        // SAFETY: `self.buffer` is a live, `init`-ed attribute list;
+        // `value`/`size` are caller-supplied per this function's own
+        // safety contract; `previous_value`/`return_size` are documented-
+        // valid NULLs (this crate never reads an attribute's prior
+        // value).
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                self.buffer.as_mut_ptr(),
+                0,
+                attribute,
+                value,
+                size,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            Err(Win32Error::last())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Tear down this attribute list — `DeleteProcThreadAttributeList`.
+    /// Idempotent: a second call (or the [`Drop`] impl running after an
+    /// explicit call here) is a no-op, not a double-free.
+    pub fn delete(&mut self) {
+        if !self.deleted {
+            // SAFETY: `self.buffer` was successfully initialized by
+            // `init` and not yet deleted (`self.deleted` just checked
+            // above).
+            unsafe { DeleteProcThreadAttributeList(self.buffer.as_mut_ptr()) };
+            self.deleted = true;
+        }
+    }
+}
+
+impl Drop for AttributeList {
+    fn drop(&mut self) {
+        self.delete();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +329,58 @@ mod tests {
 
         // SAFETY: `input_write`/`output_read` are this test's own
         // remaining pipe ends, never passed to `create`/`close` above.
+        unsafe { handle::close(input_write) }
+            .expect("closing the input pipe's write end should succeed");
+        unsafe { handle::close(output_read) }
+            .expect("closing the output pipe's read end should succeed");
+    }
+
+    #[test]
+    fn attribute_list_init_then_delete_round_trips() {
+        let mut list =
+            AttributeList::init(1).expect("InitializeProcThreadAttributeList should succeed");
+        list.delete();
+        // A second explicit delete (before Drop also runs at the end of
+        // this scope) must be a no-op, not a double `DeleteProcThreadAttributeList`.
+        list.delete();
+    }
+
+    #[test]
+    fn attribute_list_update_binds_a_pseudoconsole_attribute() {
+        let (input_read, input_write) = handle::create_pipe()
+            .expect("create_pipe should succeed for the pseudoconsole's input pipe");
+        let (output_read, output_write) = handle::create_pipe()
+            .expect("create_pipe should succeed for the pseudoconsole's output pipe");
+        let size = Coord { x: 80, y: 25 };
+        // SAFETY: `input_read`/`output_write` are freshly created, open
+        // pipe handles from the calls above.
+        let hpc = unsafe { create(input_read, output_write, size) }
+            .expect("CreatePseudoConsole should succeed with a fresh pipe pair");
+        // SAFETY: per `create`'s documented pattern, close this test's
+        // own copies now that ConPTY has duplicated them internally.
+        unsafe { handle::close(input_read) }
+            .expect("closing this test's own copy of the input pipe's read end should succeed");
+        unsafe { handle::close(output_write) }
+            .expect("closing this test's own copy of the output pipe's write end should succeed");
+
+        let mut list =
+            AttributeList::init(1).expect("InitializeProcThreadAttributeList should succeed");
+        // SAFETY: `hpc` is a live, valid HPCON from `create` above, and
+        // stays alive (not moved, not dropped) for the rest of this
+        // test, well past this `update` call.
+        unsafe {
+            list.update(
+                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                (&hpc as *const Hpcon).cast(),
+                core::mem::size_of::<Hpcon>(),
+            )
+        }
+        .expect("UpdateProcThreadAttribute should succeed binding a real HPCON");
+
+        list.delete();
+
+        // SAFETY: `hpc` is still open from the calls above.
+        unsafe { close(hpc) };
         unsafe { handle::close(input_write) }
             .expect("closing the input pipe's write end should succeed");
         unsafe { handle::close(output_read) }
