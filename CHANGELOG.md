@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `net::listen` (`listen`) — mark a bound TCP socket passive/listening,
+  needed before it can accept incoming connections.
 - `SocketAddr` (`V4`/`V6`) plus `to_sockaddr`/`from_sockaddr` conversions
   and the verified `sockaddr_in`/`sockaddr_in6` wire-format layouts (16
   and 28 bytes) — the shared `{ip, port}` address plumbing every

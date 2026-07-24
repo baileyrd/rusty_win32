@@ -6,6 +6,19 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #247 — net: add listen
+**2026-07-24** · [#247](https://github.com/baileyrd/rusty_win32/pull/247)
+
+- **Added:** `net::listen` (`listen`), closing issue #176 — mark a bound
+  TCP socket passive/listening, needed before it can accept incoming
+  connections. `backlog` is passed through to `listen` unmodified — this
+  crate applies no policy to it. The lowercase Win32/BSD-sockets symbol
+  `listen` again collides with this crate's own `net::listen` wrapper
+  (the same issue PR #245's `socket` and PR #246's `bind` hit) — bound
+  via `#[link_name = "listen"]` on a distinctly-named `raw_listen`
+  extern. Tested binding a TCP/IPv4 socket to `127.0.0.1:0` (port `0`
+  asks Windows for any free ephemeral port) and marking it listening.
+
 ## PR #246 — net: add SocketAddr/sockaddr plumbing + bind
 **2026-07-24** · [#246](https://github.com/baileyrd/rusty_win32/pull/246)
 
