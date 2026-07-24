@@ -5,6 +5,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `conpty::AttributeList` (`InitializeProcThreadAttributeList`/
+  `UpdateProcThreadAttribute`/`DeleteProcThreadAttributeList`) — the
+  generic extended-process-attribute mechanism `CreateProcessW` reads to
+  receive an `Hpcon`. A query-then-allocate opaque-byte-buffer pattern,
+  new territory for this crate, distinct from its existing "retry a
+  UTF-16 buffer at the reported size" idiom.
 - `conpty` module (new subsystem): `conpty::create`/`conpty::resize`/
   `conpty::close` (`CreatePseudoConsole`/`ResizePseudoConsole`/
   `ClosePseudoConsole`) plus `Hpcon` and

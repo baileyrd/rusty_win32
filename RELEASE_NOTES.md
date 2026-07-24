@@ -6,6 +6,33 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #258 — conpty: add process-attribute-list plumbing
+**2026-07-24** · [#258](https://github.com/baileyrd/rusty_win32/pull/258)
+
+- **Added:** `conpty::AttributeList` (`InitializeProcThreadAttributeList`/
+  `UpdateProcThreadAttribute`/`DeleteProcThreadAttributeList`), closing
+  issue #188 — the generic (pre-ConPTY, Vista-era) extended-process-
+  attribute mechanism, the only way to hand an `Hpcon` to
+  `CreateProcessW` (via `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, from PR
+  #257). `PROC_THREAD_ATTRIBUTE_LIST`'s true byte size is knowable only
+  at runtime: `AttributeList::init` calls
+  `InitializeProcThreadAttributeList` once with a null buffer (its
+  documented size-query mode) to discover the required size, then again
+  on a freshly allocated `Vec<u8>` to do the real initialization — a
+  query-then-allocate opaque-byte-buffer pattern, new territory for this
+  crate, distinct from its existing "retry a UTF-16 string buffer at the
+  size the API reports" idiom (`console::title`,
+  `service::display_name`/`key_name`). `SIZE_T`/`DWORD_PTR` widths (both
+  8 bytes) and the full three-function signature set verified via a
+  compiled mingw-w64 probe. `AttributeList::delete`
+  (`DeleteProcThreadAttributeList`) is idempotent — a second explicit
+  call, or the `Drop` impl running after one, is a no-op rather than a
+  double-free. Tested `init`/`delete` alone, plus a full integration
+  test binding a real `Hpcon` (from `conpty::create`) into a freshly
+  initialized attribute list via `update`, confirming
+  `UpdateProcThreadAttribute` itself succeeds — the strongest check
+  available without `CreateProcessW` (issue #189, next).
+
 ## PR #257 — conpty: add pseudoconsole lifecycle + Hpcon
 **2026-07-24** · [#257](https://github.com/baileyrd/rusty_win32/pull/257)
 
