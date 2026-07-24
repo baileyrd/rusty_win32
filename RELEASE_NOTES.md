@@ -6,6 +6,24 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #252 — net: add shutdown
+**2026-07-24** · [#252](https://github.com/baileyrd/rusty_win32/pull/252)
+
+- **Added:** `net::shutdown` (`shutdown`) plus `ShutdownHow`
+  (`Receive`/`Send`/`Both`), closing issue #181 — half-close a connected
+  socket's send and/or receive direction before `close_socket`. Distinct
+  from closing the handle outright: after `shutdown(sock,
+  ShutdownHow::Send)` the socket can still `recv` any data the peer sent
+  before observing the close. Same lowercase-symbol collision as the rest
+  of this module's BSD-socket wrappers — bound via
+  `#[link_name = "shutdown"]` on a distinctly-named `raw_shutdown`
+  extern. `ShutdownHow`'s discriminants (`SD_RECEIVE`/`SD_SEND`/
+  `SD_BOTH` = 0/1/2) verified via a compiled mingw-w64 probe. Tested
+  end-to-end over a real local TCP connection: after the client calls
+  `shutdown(.., Send)`, the accepted socket's `recv` observes a clean
+  `Ok(0)` end-of-stream, the same signal `recv` reports for the peer's
+  own orderly `closesocket`.
+
 ## PR #251 — net: add sendto/recvfrom
 **2026-07-24** · [#251](https://github.com/baileyrd/rusty_win32/pull/251)
 
