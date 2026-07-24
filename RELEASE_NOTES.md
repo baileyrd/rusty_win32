@@ -6,6 +6,24 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #243 — service: add dependent_services
+**2026-07-24** · [#243](https://github.com/baileyrd/rusty_win32/pull/243)
+
+- **Added:** `service::dependent_services` (`EnumDependentServicesW`)
+  plus `DependentService`/`ServiceState`/`SERVICE_ENUMERATE_DEPENDENTS`,
+  closing issue #172 — list every service depending on a given one, the
+  "will stopping this break something else" check before calling
+  `control` with `ServiceControl::Stop`. Reuses `control`'s existing
+  `ServiceStatusRaw` (the older, pid-less `SERVICE_STATUS`) rather than
+  `enum_services`'s `SERVICE_STATUS_PROCESS`, since
+  `EnumDependentServicesW` reports the former. Grows the buffer and
+  retries on either `ERROR_MORE_DATA` (this function's own documented
+  failure code) or `ERROR_INSUFFICIENT_BUFFER` (treated the same, out of
+  caution after PR #242's own buffer-sizing surprise). This completes
+  the `service` module's round-2 batch — issues #165 through #172, PRs
+  #236-#243. The round-2 parity-loop now moves into the `net` module
+  (issues #173-#186).
+
 ## PR #242 — service: add display_name/key_name
 **2026-07-24** · [#242](https://github.com/baileyrd/rusty_win32/pull/242)
 

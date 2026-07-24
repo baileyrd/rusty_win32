@@ -5,6 +5,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `service::dependent_services` (`EnumDependentServicesW`) plus
+  `DependentService`/`ServiceState`/`SERVICE_ENUMERATE_DEPENDENTS` —
+  list every service depending on a given one, the "will stopping this
+  break something else" check before calling `control` with
+  `ServiceControl::Stop`. This completes the `service` module's round-2
+  batch (issues #165-#172).
 - `service::display_name`/`service::key_name`
   (`GetServiceDisplayNameW`/`GetServiceKeyNameW`) — translate between a
   service's short key name (`"eventlog"`) and human-readable display name

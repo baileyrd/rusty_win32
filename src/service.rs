@@ -79,6 +79,14 @@ unsafe extern "system" {
         service_name: *mut u16,
         buf_len: *mut u32,
     ) -> i32;
+    fn EnumDependentServicesW(
+        handle: RawHandle,
+        service_state: u32,
+        services: *mut u8,
+        buf_size: u32,
+        bytes_needed: *mut u32,
+        services_returned: *mut u32,
+    ) -> i32;
 }
 
 /// `SC_MANAGER_CONNECT` — the minimal access right needed to open a
@@ -109,6 +117,11 @@ pub const SERVICE_START: u32 = 0x0010;
 /// the service's state). Verified against mingw-w64's own `winsvc.h`
 /// with a compiled `_Static_assert` probe.
 pub const SERVICE_INTERROGATE: u32 = 0x0080;
+
+/// `SERVICE_ENUMERATE_DEPENDENTS` — the access right [`dependent_services`]
+/// needs. Verified against mingw-w64's own `winsvc.h` with a compiled
+/// `_Static_assert` probe.
+pub const SERVICE_ENUMERATE_DEPENDENTS: u32 = 0x0008;
 
 /// Connect to the local Service Control Manager — `OpenSCManagerW`, the
 /// entry point every other function in this module needs (directly, or
@@ -201,6 +214,7 @@ pub unsafe fn start(handle: RawHandle) -> Result<(), Win32Error> {
 // immediate status this struct carries is discarded rather than
 // returned.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct ServiceStatusRaw {
     service_type: u32,
     current_state: u32,
@@ -793,6 +807,127 @@ pub unsafe fn key_name(
     Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
 }
 
+/// `EnumDependentServicesW`'s `dwServiceState` selector — the same three
+/// values [`enum_services`] itself always passes as
+/// [`SERVICE_STATE_ALL`] internally, exposed here as a real parameter
+/// since [`dependent_services`]'s own issue explicitly calls for one.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceState {
+    Active = SERVICE_ACTIVE,
+    Inactive = SERVICE_INACTIVE,
+    All = SERVICE_STATE_ALL,
+}
+
+// ENUM_SERVICE_STATUSW: `size_of` 48 (44 bytes of real fields, padded to
+// an 8-byte boundary by the two leading pointers) -- verified against
+// mingw-w64's own `winsvc.h` with a compiled `_Static_assert` probe. The
+// older, pid-less `SERVICE_STATUS` (this crate's existing
+// `ServiceStatusRaw`, from `control`), not `SERVICE_STATUS_PROCESS`.
+// `lpServiceName`/`lpDisplayName` point into the same buffer
+// `EnumDependentServicesW` filled, the same treatment `enum_services`'s
+// `EnumServiceStatusProcessW` gets.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct EnumServiceStatusRaw {
+    service_name: *mut u16,
+    display_name: *mut u16,
+    service_status: ServiceStatusRaw,
+}
+const _: () = assert!(core::mem::size_of::<EnumServiceStatusRaw>() == 48);
+
+/// One dependent service's name, display name, and status, as returned
+/// by [`dependent_services`] — the "will stopping this break something
+/// else" check before calling [`control`] with
+/// [`ServiceControl::Stop`]. Lacks a process id/service-flags field
+/// (unlike [`ServiceStatusEntry`]): `EnumDependentServicesW` reports the
+/// older, pid-less `SERVICE_STATUS`, not `SERVICE_STATUS_PROCESS`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependentService {
+    pub service_name: alloc::string::String,
+    pub display_name: alloc::string::String,
+    pub service_type: u32,
+    pub current_state: u32,
+    pub controls_accepted: u32,
+    pub win32_exit_code: u32,
+    pub service_specific_exit_code: u32,
+    pub check_point: u32,
+    pub wait_hint: u32,
+}
+
+/// List every service depending on `handle`'s own service, in the given
+/// `state` — `EnumDependentServicesW`, the "will stopping this break
+/// something else" check before calling [`control`] with
+/// [`ServiceControl::Stop`]. Grows the buffer and retries on either
+/// `ERROR_MORE_DATA` (this function's own documented failure code for
+/// an undersized buffer) or `ERROR_INSUFFICIENT_BUFFER` (treated the
+/// same, out of caution after [`display_name`]/[`key_name`]'s own
+/// buffer-sizing surprise — see [`NAME_QUERY_MAX_RETRIES`]'s doc
+/// comment).
+///
+/// # Safety
+///
+/// `handle` must be a currently-open, valid service handle from
+/// [`open_service`] with at least [`SERVICE_ENUMERATE_DEPENDENTS`].
+pub unsafe fn dependent_services(
+    handle: RawHandle,
+    state: ServiceState,
+) -> Result<Vec<DependentService>, Win32Error> {
+    let mut buf_len: u32 = 8 * 1024;
+    loop {
+        let mut buf: Vec<u8> = alloc::vec![0u8; buf_len as usize];
+        let mut bytes_needed: u32 = 0;
+        let mut services_returned: u32 = 0;
+        // SAFETY: `handle` is caller-supplied per this function's own
+        // safety contract; `buf` is a valid buffer matched by `buf_len`
+        // naming its exact size; `bytes_needed`/`services_returned` are
+        // valid out-pointers.
+        let ok = unsafe {
+            EnumDependentServicesW(
+                handle,
+                state as u32,
+                buf.as_mut_ptr(),
+                buf_len,
+                &mut bytes_needed,
+                &mut services_returned,
+            )
+        };
+        if ok == 0 {
+            let err = Win32Error::last();
+            if err != Win32Error::ERROR_MORE_DATA && err != Win32Error::ERROR_INSUFFICIENT_BUFFER {
+                return Err(err);
+            }
+            buf_len = bytes_needed.max(buf_len + 1).max(buf_len * 2);
+            continue;
+        }
+
+        let mut ptr = buf.as_ptr();
+        let mut result = Vec::with_capacity(services_returned as usize);
+        for _ in 0..services_returned {
+            // SAFETY: `EnumDependentServicesW` guarantees
+            // `services_returned` fixed-size `EnumServiceStatusRaw`
+            // records packed contiguously starting at `buf`'s own start.
+            let record: EnumServiceStatusRaw = unsafe { core::ptr::read_unaligned(ptr.cast()) };
+            result.push(DependentService {
+                // SAFETY: `record.service_name`/`record.display_name`
+                // point into `buf`, which is still alive for this whole
+                // loop body.
+                service_name: unsafe { decode_wide_cstr(record.service_name) },
+                display_name: unsafe { decode_wide_cstr(record.display_name) },
+                service_type: record.service_status.service_type,
+                current_state: record.service_status.current_state,
+                controls_accepted: record.service_status.controls_accepted,
+                win32_exit_code: record.service_status.win32_exit_code,
+                service_specific_exit_code: record.service_status.service_specific_exit_code,
+                check_point: record.service_status.check_point,
+                wait_hint: record.service_status.wait_hint,
+            });
+            ptr = unsafe { ptr.add(core::mem::size_of::<EnumServiceStatusRaw>()) };
+        }
+        return Ok(result);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1040,6 +1175,32 @@ mod tests {
         assert_eq!(err, Win32Error::ERROR_SERVICE_DOES_NOT_EXIST);
 
         // SAFETY: `scm` is still open (not yet closed).
+        unsafe { close(scm) }.expect("CloseServiceHandle should succeed on the SCM handle");
+    }
+
+    #[test]
+    fn dependent_services_succeeds_for_the_event_log_service() {
+        let scm = open_manager(SC_MANAGER_CONNECT)
+            .expect("OpenSCManagerW should succeed with SC_MANAGER_CONNECT");
+        // SAFETY: `scm` is valid and open from the call just above.
+        let service = unsafe { open_service(scm, "EventLog", SERVICE_ENUMERATE_DEPENDENTS) }
+            .expect("OpenServiceW should succeed for the well-known EventLog service");
+
+        // EventLog may or may not have any real dependents on a given
+        // machine -- this only asserts the call itself succeeds and
+        // decodes cleanly, not any particular count.
+        // SAFETY: `service` is valid and open from the call just above.
+        let dependents = unsafe { dependent_services(service, ServiceState::All) }
+            .expect("EnumDependentServicesW should succeed for a valid service handle");
+        assert!(
+            dependents
+                .iter()
+                .all(|d| !d.service_name.is_empty() && !d.display_name.is_empty()),
+            "every reported dependent should have nonempty names, got: {dependents:?}"
+        );
+
+        // SAFETY: `service`/`scm` are still open (not yet closed).
+        unsafe { close(service) }.expect("CloseServiceHandle should succeed on the service handle");
         unsafe { close(scm) }.expect("CloseServiceHandle should succeed on the SCM handle");
     }
 }
