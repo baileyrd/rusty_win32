@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `net::sendto`/`net::recvfrom` (`sendto`/`recvfrom`) — connectionless
+  datagram I/O, the bare UDP round trip, marshaling a
+  `sockaddr_in`/`sockaddr_in6` address (via the existing
+  `to_sockaddr`/`from_sockaddr` plumbing) on every call rather than
+  relying on a fixed peer.
 - `net::send`/`net::recv` (`send`/`recv`) — byte-slice I/O on a
   connected socket, thin wrappers matching `console::read`/
   `console::write`'s shape. `recv` reports `Ok(0)` for the peer's

@@ -57,6 +57,28 @@ unsafe extern "system" {
     fn raw_send(sock: usize, buf: *const u8, len: i32, flags: i32) -> i32;
     #[link_name = "recv"]
     fn raw_recv(sock: usize, buf: *mut u8, len: i32, flags: i32) -> i32;
+    // Same lowercase-symbol collision as `socket`/`bind`/`listen`/
+    // `accept`/`connect`/`send`/`recv` above -- `sendto`/`recvfrom` would
+    // otherwise clash with this module's own `sendto`/`recvfrom` wrapper
+    // functions.
+    #[link_name = "sendto"]
+    fn raw_sendto(
+        sock: usize,
+        buf: *const u8,
+        len: i32,
+        flags: i32,
+        to: *const u8,
+        tolen: i32,
+    ) -> i32;
+    #[link_name = "recvfrom"]
+    fn raw_recvfrom(
+        sock: usize,
+        buf: *mut u8,
+        len: i32,
+        flags: i32,
+        from: *mut u8,
+        fromlen: *mut i32,
+    ) -> i32;
 }
 
 /// `INVALID_SOCKET` — the sentinel `socket` returns on failure (real
@@ -559,6 +581,94 @@ pub unsafe fn recv(sock: RawSocket, buf: &mut [u8]) -> Result<usize, crate::erro
     }
 }
 
+/// Send `buf` to `addr` on a connectionless (typically
+/// [`SocketKind::Dgram`]) socket — `sendto`, the bare UDP round trip's
+/// send half, marshaling `addr` into a `sockaddr_in`/`sockaddr_in6` via
+/// [`to_sockaddr`] each call (unlike [`send`], which needs no address
+/// since [`connect`] already fixed the peer).
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid socket from [`socket`].
+pub unsafe fn sendto(
+    sock: RawSocket,
+    buf: &[u8],
+    addr: &SocketAddr,
+) -> Result<usize, crate::error::Win32Error> {
+    let raw = to_sockaddr(addr);
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `buf` is a valid, `buf.len()`-byte readable buffer;
+    // `raw` is a valid `sockaddr`-shaped buffer with `raw.len()` naming
+    // its exact encoded length; `flags = 0` requests ordinary blocking
+    // send behavior, this module's only supported case.
+    let sent = unsafe {
+        raw_sendto(
+            sock,
+            buf.as_ptr(),
+            buf.len() as i32,
+            0,
+            raw.as_ptr(),
+            raw.len(),
+        )
+    };
+    if sent < 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ))
+    } else {
+        Ok(sent as usize)
+    }
+}
+
+/// Read up to `buf.len()` bytes from a connectionless (typically
+/// [`SocketKind::Dgram`]) socket in one call, reporting the sender's
+/// address — `recvfrom`, the bare UDP round trip's receive half. Unlike
+/// [`recv`], this decodes the sender's `sockaddr_in`/`sockaddr_in6` back
+/// into a [`SocketAddr`] via [`from_sockaddr`] on every call, since a
+/// connectionless socket has no single fixed peer.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid socket from [`socket`].
+pub unsafe fn recvfrom(
+    sock: RawSocket,
+    buf: &mut [u8],
+) -> Result<(usize, SocketAddr), crate::error::Win32Error> {
+    let mut from_buf = [0u8; 28];
+    let mut from_len: i32 = from_buf.len() as i32;
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `buf` is a valid, `buf.len()`-byte writable buffer;
+    // `from_buf` is a valid buffer matched by `from_len` naming its
+    // exact capacity; `flags = 0` requests ordinary blocking receive
+    // behavior, this module's only supported case.
+    let received = unsafe {
+        raw_recvfrom(
+            sock,
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+            0,
+            from_buf.as_mut_ptr(),
+            &mut from_len,
+        )
+    };
+    if received < 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        return Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ));
+    }
+    // SAFETY: a successful `recvfrom` guarantees `from_buf` was filled
+    // with `from_len` valid bytes naming the sender's `sockaddr_in`/
+    // `sockaddr_in6`.
+    let sender = unsafe { from_sockaddr(from_buf.as_ptr(), from_len) }?;
+    Ok((received as usize, sender))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -878,6 +988,72 @@ mod tests {
         unsafe { close_socket(accepted) }
             .expect("closesocket should succeed on the accepted socket");
         unsafe { close_socket(server) }.expect("closesocket should succeed on the server socket");
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn sendto_then_recvfrom_carries_a_datagram_and_the_senders_address() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let receiver = socket(AddressFamily::Inet, SocketKind::Dgram, Protocol::Udp)
+            .expect("socket should succeed creating the receiver's UDP/IPv4 socket");
+        const RECEIVER_PORT: u16 = 47953;
+        const SENDER_PORT: u16 = 47954;
+        let receiver_addr = SocketAddr::V4 {
+            ip: [127, 0, 0, 1],
+            port: RECEIVER_PORT,
+        };
+        let sender_addr = SocketAddr::V4 {
+            ip: [127, 0, 0, 1],
+            port: SENDER_PORT,
+        };
+        // SAFETY: `receiver` was just created above and hasn't been
+        // closed yet.
+        unsafe { bind(receiver, &receiver_addr) }
+            .expect("bind should succeed on the receiver's fixed loopback port");
+
+        let sender = socket(AddressFamily::Inet, SocketKind::Dgram, Protocol::Udp)
+            .expect("socket should succeed creating the sender's UDP/IPv4 socket");
+        // Binding the sender to its own fixed port (rather than an
+        // ephemeral one) lets this test assert the exact source port
+        // `recvfrom` reports, without needing `getsockname` (not yet
+        // implemented -- a later round-2 item).
+        // SAFETY: `sender` was just created above and hasn't been closed
+        // yet.
+        unsafe { bind(sender, &sender_addr) }
+            .expect("bind should succeed on the sender's fixed loopback port");
+
+        const MESSAGE: &[u8] = b"hello over rusty_win32 net::sendto/recvfrom";
+        // SAFETY: `sender` is bound from the call above.
+        let sent = unsafe { sendto(sender, MESSAGE, &receiver_addr) }
+            .expect("sendto should succeed targeting the receiver's bound address");
+        assert_eq!(
+            sent,
+            MESSAGE.len(),
+            "sendto should report the full datagram written"
+        );
+
+        let mut buf = [0u8; MESSAGE.len()];
+        // SAFETY: `receiver` is bound from the call above.
+        let (received, from) = unsafe { recvfrom(receiver, &mut buf) }
+            .expect("recvfrom should succeed reading the datagram just sent");
+        assert_eq!(
+            received,
+            MESSAGE.len(),
+            "recvfrom should report the full datagram read"
+        );
+        assert_eq!(&buf[..received], MESSAGE);
+        assert_eq!(
+            from, sender_addr,
+            "recvfrom should report the sender's own bound address"
+        );
+
+        // SAFETY: `sender`/`receiver` were both just created/opened
+        // above and haven't been closed yet.
+        unsafe { close_socket(sender) }.expect("closesocket should succeed on the sender socket");
+        unsafe { close_socket(receiver) }
+            .expect("closesocket should succeed on the receiver socket");
 
         cleanup().expect("WSACleanup should succeed matching the startup call above");
     }
