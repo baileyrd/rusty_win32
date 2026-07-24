@@ -40,6 +40,11 @@ unsafe extern "system" {
     // function.
     #[link_name = "listen"]
     fn raw_listen(sock: usize, backlog: i32) -> i32;
+    // Same lowercase-symbol collision as `socket`/`bind`/`listen` above --
+    // `accept` would otherwise clash with this module's own `accept`
+    // wrapper function.
+    #[link_name = "accept"]
+    fn raw_accept(sock: usize, addr: *mut u8, addrlen: *mut i32) -> usize;
 }
 
 /// `INVALID_SOCKET` — the sentinel `socket` returns on failure (real
@@ -340,12 +345,6 @@ pub(crate) fn to_sockaddr(addr: &SocketAddr) -> RawSockAddr {
 /// `ptr` must point to at least `len` readable bytes, and (if `len` is
 /// large enough to name one) a valid `sin_family`/`sin6_family` at
 /// offset `0`.
-// Not yet called outside this module's own tests: its real callers
-// (`accept`/`recvfrom`/`local_addr`/`peer_addr`) are later round-2
-// items, not yet implemented -- built now alongside `to_sockaddr`
-// since both directions are this module's shared address plumbing
-// (see this crate's own issue #185).
-#[allow(dead_code)]
 pub(crate) unsafe fn from_sockaddr(
     ptr: *const u8,
     len: i32,
@@ -433,6 +432,36 @@ pub unsafe fn listen(sock: RawSocket, backlog: i32) -> Result<(), crate::error::
     } else {
         Ok(())
     }
+}
+
+/// Accept one incoming TCP connection — `accept`, returning a new,
+/// already-connected socket plus the peer's address. `sock` itself stays
+/// open and listening afterward, ready to accept further connections.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid, already-[`listen`]-ing
+/// socket from [`socket`].
+pub unsafe fn accept(sock: RawSocket) -> Result<(RawSocket, SocketAddr), crate::error::Win32Error> {
+    let mut buf = [0u8; 28];
+    let mut addr_len: i32 = buf.len() as i32;
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `buf` is a valid buffer matched by `addr_len` naming its
+    // exact capacity.
+    let new_sock = unsafe { raw_accept(sock, buf.as_mut_ptr(), &mut addr_len) };
+    if new_sock == INVALID_SOCKET {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        return Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ));
+    }
+    // SAFETY: a successful `accept` guarantees `buf` was filled with
+    // `addr_len` valid bytes naming the peer's `sockaddr_in`/
+    // `sockaddr_in6`.
+    let peer = unsafe { from_sockaddr(buf.as_ptr(), addr_len) }?;
+    Ok((new_sock, peer))
 }
 
 #[cfg(test)]
@@ -576,6 +605,59 @@ mod tests {
         // yet.
         unsafe { close_socket(sock) }
             .expect("closesocket should succeed on a freshly created socket");
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn accept_returns_a_connected_socket_and_the_peers_address() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let sock = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating a TCP/IPv4 socket");
+        // A fixed (not port-0/ephemeral) port -- this crate doesn't have
+        // `connect`/`getsockname` yet (later round-2 items), so the test's
+        // `std::net::TcpStream` client below needs a port number it can
+        // already know in advance.
+        const TEST_PORT: u16 = 47950;
+        let addr = SocketAddr::V4 {
+            ip: [127, 0, 0, 1],
+            port: TEST_PORT,
+        };
+        // SAFETY: `sock` was just created above and hasn't been closed
+        // yet.
+        unsafe { bind(sock, &addr) }.expect("bind should succeed on 127.0.0.1:TEST_PORT");
+        // SAFETY: `sock` is still open, now bound.
+        unsafe { listen(sock, 1) }.expect("listen should succeed on a freshly bound TCP socket");
+
+        // A real client connection, via `std::net` (always linked in
+        // this test harness) rather than this crate's own `connect`
+        // (not yet implemented) -- run on a background thread since
+        // `accept` below blocks until a connection arrives.
+        let client_thread = std::thread::spawn(move || {
+            std::net::TcpStream::connect(("127.0.0.1", TEST_PORT))
+                .expect("the std::net client should succeed connecting to our listening socket")
+        });
+
+        // SAFETY: `sock` is open and listening from the calls above.
+        let (new_sock, peer) =
+            unsafe { accept(sock) }.expect("accept should succeed once the client connects");
+        let _client = client_thread
+            .join()
+            .expect("the client thread should not panic");
+
+        match peer {
+            SocketAddr::V4 { ip, .. } => {
+                assert_eq!(ip, [127, 0, 0, 1], "the peer's address should be loopback")
+            }
+            SocketAddr::V6 { .. } => panic!("expected an IPv4 peer address, got: {peer:?}"),
+        }
+
+        // SAFETY: `new_sock`/`sock` were both just created/opened above
+        // and haven't been closed yet.
+        unsafe { close_socket(new_sock) }
+            .expect("closesocket should succeed on the accepted socket");
+        unsafe { close_socket(sock) }.expect("closesocket should succeed on the listening socket");
 
         cleanup().expect("WSACleanup should succeed matching the startup call above");
     }

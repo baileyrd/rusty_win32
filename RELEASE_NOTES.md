@@ -6,6 +6,23 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #248 — net: add accept
+**2026-07-24** · [#248](https://github.com/baileyrd/rusty_win32/pull/248)
+
+- **Added:** `net::accept` (`accept`), closing issue #177 — accept one
+  incoming TCP connection, returning a new, already-connected socket
+  plus the peer's address. `sock` itself stays open and listening
+  afterward. This is `from_sockaddr`'s first real (non-test) caller
+  (built alongside `to_sockaddr` in PR #246 but unused outside tests
+  until now) — its `#[allow(dead_code)]` is removed. Same lowercase-
+  symbol collision as `socket`/`bind`/`listen` — bound via
+  `#[link_name = "accept"]` on a distinctly-named `raw_accept` extern.
+  Tested end-to-end: binds/listens on a fixed loopback port, connects a
+  real client via `std::net::TcpStream` on a background thread (this
+  crate has no `connect` yet — a later round-2 item), and verifies
+  `accept` returns a usable socket and the expected loopback peer
+  address.
+
 ## PR #247 — net: add listen
 **2026-07-24** · [#247](https://github.com/baileyrd/rusty_win32/pull/247)
 
