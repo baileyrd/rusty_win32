@@ -6,6 +6,22 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #251 — net: add sendto/recvfrom
+**2026-07-24** · [#251](https://github.com/baileyrd/rusty_win32/pull/251)
+
+- **Added:** `net::sendto`/`net::recvfrom` (`sendto`/`recvfrom`),
+  closing issue #180 — connectionless datagram I/O, the bare UDP round
+  trip. Each call marshals a `sockaddr_in`/`sockaddr_in6` address (via
+  the existing `to_sockaddr`/`from_sockaddr` plumbing from PR #246)
+  rather than relying on a fixed peer the way `send`/`recv` (PR #250) do
+  after `connect`. Same lowercase-symbol collision as the rest of this
+  module's BSD-socket wrappers — bound via `#[link_name = "sendto"]`/
+  `#[link_name = "recvfrom"]` on distinctly-named `raw_sendto`/
+  `raw_recvfrom` externs. Tested end-to-end with two UDP sockets on
+  fixed loopback ports (avoiding a dependency on `getsockname`, not yet
+  implemented): `sendto` from one, `recvfrom` on the other, verifying
+  both the datagram's content and the reported sender address.
+
 ## PR #250 — net: add send/recv
 **2026-07-24** · [#250](https://github.com/baileyrd/rusty_win32/pull/250)
 
