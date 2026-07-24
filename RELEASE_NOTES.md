@@ -6,6 +6,18 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #242 — service: add display_name/key_name
+**2026-07-24** · [#242](https://github.com/baileyrd/rusty_win32/pull/242)
+
+- **Added:** `service::display_name`/`service::key_name`
+  (`GetServiceDisplayNameW`/`GetServiceKeyNameW`), closing issue #171 —
+  translate between a service's short key name (`"eventlog"`) and its
+  human-readable display name (`"Windows Event Log"`). Both use the same
+  query-size-then-allocate idiom as PR #229's `lookup_account_sid`/PR
+  #216's `registry::query_value`. Tested round-tripping the well-known
+  "EventLog" service's display name back to its key name (case-
+  insensitive, matching Windows' own service-name comparison semantics).
+
 ## PR #241 — service: add config
 **2026-07-24** · [#241](https://github.com/baileyrd/rusty_win32/pull/241)
 

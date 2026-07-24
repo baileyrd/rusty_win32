@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `service::display_name`/`service::key_name`
+  (`GetServiceDisplayNameW`/`GetServiceKeyNameW`) — translate between a
+  service's short key name (`"eventlog"`) and human-readable display name
+  (`"Windows Event Log"`), using the query-size-then-allocate idiom this
+  crate already uses elsewhere.
 - `service::config` (`QueryServiceConfigW`) plus `ServiceConfig` — one
   service's static configuration (start type, binary path, display name,
   dependencies), for a `systemctl show`-style detail view. Grows the
