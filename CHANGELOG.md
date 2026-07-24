@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `net::set_sockopt`/`net::get_sockopt` (`setsockopt`/`getsockopt`) plus
+  `SockOpt`/`SockOptKind`/`SockOptValue` — `SO_REUSEADDR`, `SO_RCVTIMEO`/
+  `SO_SNDTIMEO` (a plain millisecond `DWORD` on Windows, unlike POSIX's
+  `timeval`), `TCP_NODELAY`, and `SO_ERROR`.
 - `net::shutdown` (`shutdown`) plus `ShutdownHow` (`Receive`/`Send`/`Both`)
   — half-close a connected socket's send and/or receive direction without
   invalidating the handle itself, unlike `close_socket`. Lets a TCP client
