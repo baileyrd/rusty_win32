@@ -6,6 +6,24 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #245 — net: add socket/close_socket
+**2026-07-24** · [#245](https://github.com/baileyrd/rusty_win32/pull/245)
+
+- **Added:** `net::socket`/`net::close_socket` (`socket`/`closesocket`)
+  plus `RawSocket`, `AddressFamily` (`Inet`/`Inet6`), `SocketKind`
+  (`Stream`/`Dgram`), and `Protocol` (`Tcp`/`Udp`), closing issue #174 —
+  socket lifecycle create/destroy. `RawSocket = usize` (matching
+  `std::os::windows::io::RawSocket` and mingw's own `SOCKET` typedef) is
+  a distinct handle namespace from `handle::RawHandle`: a `SOCKET` is
+  closed via `close_socket`, never `CloseHandle`. The real Win32/BSD-
+  sockets symbol is lowercase `socket`, which would otherwise collide
+  with this crate's own `net::socket` wrapper function — bound via
+  `#[link_name = "socket"]` on a distinctly-named `raw_socket` extern,
+  a new pattern for this crate (introduced here since `net`'s BSD-socket
+  API surface is the first to use lowercase C symbol names that clash
+  with natural snake_case wrapper names). Tested creating and closing
+  both TCP/IPv4 and UDP/IPv4 sockets, plus a TCP/IPv6 socket.
+
 ## PR #244 — net: add startup/cleanup
 **2026-07-24** · [#244](https://github.com/baileyrd/rusty_win32/pull/244)
 

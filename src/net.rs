@@ -24,6 +24,105 @@ unsafe extern "system" {
     fn WSAStartup(version_requested: u16, wsa_data: *mut WsaData) -> i32;
     fn WSACleanup() -> i32;
     fn WSAGetLastError() -> i32;
+    // The real Win32/BSD-sockets symbol is lowercase `socket`, which
+    // would otherwise collide with this module's own `socket` wrapper
+    // function below -- `#[link_name]` keeps the real symbol name for
+    // linking while giving the Rust binding a distinct identifier.
+    #[link_name = "socket"]
+    fn raw_socket(address_family: i32, kind: i32, protocol: i32) -> usize;
+    fn closesocket(sock: usize) -> i32;
+}
+
+/// `INVALID_SOCKET` — the sentinel `socket` returns on failure (real
+/// error code obtained separately via `WSAGetLastError`). Verified
+/// against mingw-w64's own `winsock2.h` with a compiled `_Static_assert`
+/// probe.
+const INVALID_SOCKET: usize = usize::MAX;
+
+/// A raw Windows `SOCKET` — matching `std::os::windows::io::RawSocket`
+/// and mingw's own `SOCKET` typedef (`UINT_PTR`, pointer-sized). A
+/// distinct handle namespace from [`crate::handle::RawHandle`]: a
+/// `SOCKET` is closed via [`close_socket`]/`closesocket`, never
+/// `CloseHandle`.
+pub type RawSocket = usize;
+
+/// `AF_INET`/`AF_INET6` — the two address families this module
+/// supports (out of the many `socket` itself accepts: `AF_UNIX`/
+/// `AF_IPX`/`AF_BTH`/… are all out of scope). Verified against
+/// mingw-w64's own `winsock2.h` with a compiled `_Static_assert` probe.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressFamily {
+    Inet = 2,
+    Inet6 = 23,
+}
+
+/// `SOCK_STREAM`/`SOCK_DGRAM` — the two socket types this module
+/// supports (`SOCK_RAW`/`SOCK_RDM`/`SOCK_SEQPACKET` are out of scope).
+/// Verified against mingw-w64's own `winsock2.h` with a compiled
+/// `_Static_assert` probe.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketKind {
+    Stream = 1,
+    Dgram = 2,
+}
+
+/// `IPPROTO_TCP`/`IPPROTO_UDP` — the two protocols this module supports.
+/// Verified against mingw-w64's own `winsock2.h` with a compiled
+/// `_Static_assert` probe.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    Tcp = 6,
+    Udp = 17,
+}
+
+/// Create a new socket — `socket`. Requires [`startup`] to have been
+/// called first (undefined behavior otherwise, per this module's own
+/// scope note).
+pub fn socket(
+    family: AddressFamily,
+    kind: SocketKind,
+    protocol: Protocol,
+) -> Result<RawSocket, crate::error::Win32Error> {
+    // SAFETY: `family`/`kind`/`protocol` are plain enum-backed integer
+    // values, not pointers.
+    let sock = unsafe { raw_socket(family as i32, kind as i32, protocol as i32) };
+    if sock == INVALID_SOCKET {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ))
+    } else {
+        Ok(sock)
+    }
+}
+
+/// Close a socket opened by [`socket`] — `closesocket`. Never
+/// [`crate::handle::close`]/`CloseHandle`: a `SOCKET`'s destructor is
+/// always this one.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid socket from [`socket`], not
+/// already closed.
+pub unsafe fn close_socket(sock: RawSocket) -> Result<(), crate::error::Win32Error> {
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract.
+    let ok = unsafe { closesocket(sock) };
+    if ok != 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 // WSADATA (64-bit layout, per mingw-w64's own `psdk_inc/_wsadata.h`):
@@ -118,5 +217,40 @@ mod tests {
         startup().expect("nested WSAStartup should also succeed");
         cleanup().expect("first WSACleanup should succeed");
         cleanup().expect("second WSACleanup should succeed, matching the nested startup");
+    }
+
+    #[test]
+    fn socket_then_close_socket_round_trips_for_tcp_and_udp() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let tcp = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating a TCP/IPv4 socket");
+        // SAFETY: `tcp` was just created above and hasn't been closed
+        // yet.
+        unsafe { close_socket(tcp) }
+            .expect("closesocket should succeed on a freshly created socket");
+
+        let udp = socket(AddressFamily::Inet, SocketKind::Dgram, Protocol::Udp)
+            .expect("socket should succeed creating a UDP/IPv4 socket");
+        // SAFETY: `udp` was just created above and hasn't been closed
+        // yet.
+        unsafe { close_socket(udp) }
+            .expect("closesocket should succeed on a freshly created socket");
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn socket_supports_ipv6() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+
+        let sock = socket(AddressFamily::Inet6, SocketKind::Stream, Protocol::Tcp)
+            .expect("socket should succeed creating a TCP/IPv6 socket");
+        // SAFETY: `sock` was just created above and hasn't been closed
+        // yet.
+        unsafe { close_socket(sock) }
+            .expect("closesocket should succeed on a freshly created socket");
+
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
     }
 }
