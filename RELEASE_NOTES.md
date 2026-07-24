@@ -6,6 +6,23 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #241 — service: add config
+**2026-07-24** · [#241](https://github.com/baileyrd/rusty_win32/pull/241)
+
+- **Added:** `service::config` (`QueryServiceConfigW`) plus
+  `ServiceConfig`, closing issue #170 — one service's static
+  configuration (start type, binary path, display name, load-order
+  group, dependencies), for a `systemctl show`-style detail view. Grows
+  the buffer on `ERROR_INSUFFICIENT_BUFFER` and retries, needing only
+  one retry in practice since `QueryServiceConfigW` reports the exact
+  required size up front (unlike PR #237's `enum_services`, which pages
+  across multiple calls). `binary_path_name`/`load_order_group`/
+  `service_start_name`/`display_name` reuse the existing
+  `decode_wide_cstr` helper; `dependencies` decodes `lpDependencies`'s
+  `REG_MULTI_SZ`-shaped double-NUL-terminated list into an owned
+  `Vec<String>` via a new `decode_wide_multi_sz` helper, the same
+  encoding `registry::RegistryValue::MultiSz` already decodes.
+
 ## PR #240 — service: add control
 **2026-07-24** · [#240](https://github.com/baileyrd/rusty_win32/pull/240)
 
