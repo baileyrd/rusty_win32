@@ -61,6 +61,12 @@ unsafe extern "system" {
         resume_handle: *mut u32,
         group_name: *const u16,
     ) -> i32;
+    fn QueryServiceConfigW(
+        handle: RawHandle,
+        service_config: *mut u8,
+        buf_size: u32,
+        bytes_needed: *mut u32,
+    ) -> i32;
 }
 
 /// `SC_MANAGER_CONNECT` — the minimal access right needed to open a
@@ -526,6 +532,144 @@ pub unsafe fn enum_services(scm: RawHandle) -> Result<Vec<ServiceStatusEntry>, W
     Ok(entries)
 }
 
+// QUERY_SERVICE_CONFIGW: `size_of` 64 — three `DWORD`s, two `LPWSTR`s,
+// one `DWORD`, three more `LPWSTR`s, in that exact order (verified
+// field-by-field against mingw-w64's own `winsvc.h` with a compiled
+// `_Static_assert` probe). `lpBinaryPathName`/`lpLoadOrderGroup`/
+// `lpDependencies`/`lpServiceStartName`/`lpDisplayName` all point into
+// the same buffer `QueryServiceConfigW` filled, not separately
+// owned/freed -- this crate copies them out into owned `String`s/
+// `Vec<String>` before the buffer is dropped, the same treatment
+// `enum_services`'s `EnumServiceStatusProcessW` gets.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct QueryServiceConfigRaw {
+    service_type: u32,
+    start_type: u32,
+    error_control: u32,
+    binary_path_name: *mut u16,
+    load_order_group: *mut u16,
+    tag_id: u32,
+    dependencies: *mut u16,
+    service_start_name: *mut u16,
+    display_name: *mut u16,
+}
+const _: () = assert!(core::mem::size_of::<QueryServiceConfigRaw>() == 64);
+
+/// One service's static configuration, as returned by [`config`] — start
+/// type, binary path, display name, and the rest, for a `systemctl
+/// show`-style detail view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceConfig {
+    pub service_type: u32,
+    pub start_type: u32,
+    pub error_control: u32,
+    pub binary_path_name: alloc::string::String,
+    pub load_order_group: alloc::string::String,
+    pub tag_id: u32,
+    /// The names of every service this one depends on — decoded from
+    /// `lpDependencies`'s `REG_MULTI_SZ`-shaped double-NUL-terminated
+    /// list (an empty inner string ends the list), the same encoding
+    /// [`crate::registry`]'s own `RegistryValue::MultiSz` decodes.
+    /// Empty if the service has no dependencies.
+    pub dependencies: Vec<alloc::string::String>,
+    pub service_start_name: alloc::string::String,
+    pub display_name: alloc::string::String,
+}
+
+/// Decode a `REG_MULTI_SZ`-shaped double-NUL-terminated list of wide
+/// strings pointed to by `ptr` — used for [`config`]'s `dependencies`
+/// field, which (like [`decode_wide_cstr`]'s targets) points into a
+/// buffer this crate itself allocated and doesn't guarantee any
+/// particular alignment for beyond `u8`.
+///
+/// # Safety
+///
+/// `ptr`, if non-null, must point to a valid `REG_MULTI_SZ`-shaped
+/// sequence: zero or more NUL-terminated strings, the whole sequence
+/// itself ended by an extra (empty-string) NUL.
+unsafe fn decode_wide_multi_sz(mut ptr: *const u16) -> Vec<alloc::string::String> {
+    let mut result = Vec::new();
+    if ptr.is_null() {
+        return result;
+    }
+    loop {
+        let mut len = 0usize;
+        // SAFETY: `ptr` is caller-supplied per this function's own safety
+        // contract; `read_unaligned` doesn't require 2-byte alignment.
+        while unsafe { core::ptr::read_unaligned(ptr.add(len)) } != 0 {
+            len += 1;
+        }
+        if len == 0 {
+            break;
+        }
+        let mut units = Vec::with_capacity(len);
+        for i in 0..len {
+            // SAFETY: same contract as above; `i` is within `0..len`,
+            // the range just walked to find this entry's terminating
+            // NUL.
+            units.push(unsafe { core::ptr::read_unaligned(ptr.add(i)) });
+        }
+        result.push(alloc::string::String::from_utf16_lossy(&units));
+        // SAFETY: `ptr.add(len)` is the NUL just walked to; advancing one
+        // more past it moves to the next entry (or the list's own
+        // terminating empty string).
+        ptr = unsafe { ptr.add(len + 1) };
+    }
+    result
+}
+
+/// Query `handle`'s static configuration — `QueryServiceConfigW`,
+/// growing the buffer on `ERROR_INSUFFICIENT_BUFFER` (the query-size-
+/// then-allocate idiom this crate already uses for
+/// [`crate::security::lookup_account_sid`]/[`crate::registry::query_value`],
+/// here needing only one retry since `QueryServiceConfigW` reports the
+/// exact size needed up front rather than paging like
+/// [`enum_services`]).
+///
+/// # Safety
+///
+/// `handle` must be a currently-open, valid service handle from
+/// [`open_service`] with at least [`SERVICE_QUERY_CONFIG`].
+pub unsafe fn config(handle: RawHandle) -> Result<ServiceConfig, Win32Error> {
+    let mut buf_len: u32 = 8 * 1024;
+    loop {
+        let mut buf: Vec<u8> = alloc::vec![0u8; buf_len as usize];
+        let mut bytes_needed: u32 = 0;
+        // SAFETY: `handle` is caller-supplied per this function's own
+        // safety contract; `buf` is a valid buffer matched by `buf_len`
+        // naming its exact size; `bytes_needed` is a valid out-pointer.
+        let ok =
+            unsafe { QueryServiceConfigW(handle, buf.as_mut_ptr(), buf_len, &mut bytes_needed) };
+        if ok == 0 {
+            let err = Win32Error::last();
+            if err == Win32Error::ERROR_INSUFFICIENT_BUFFER {
+                buf_len = bytes_needed;
+                continue;
+            }
+            return Err(err);
+        }
+
+        // SAFETY: a successful call guarantees `buf` starts with a fully
+        // populated `QUERY_SERVICE_CONFIGW` record.
+        let record: QueryServiceConfigRaw =
+            unsafe { core::ptr::read_unaligned(buf.as_ptr().cast()) };
+        return Ok(ServiceConfig {
+            service_type: record.service_type,
+            start_type: record.start_type,
+            error_control: record.error_control,
+            // SAFETY: every pointer field below points into `buf`, which
+            // is still alive for this whole match arm.
+            binary_path_name: unsafe { decode_wide_cstr(record.binary_path_name) },
+            load_order_group: unsafe { decode_wide_cstr(record.load_order_group) },
+            tag_id: record.tag_id,
+            dependencies: unsafe { decode_wide_multi_sz(record.dependencies) },
+            service_start_name: unsafe { decode_wide_cstr(record.service_start_name) },
+            display_name: unsafe { decode_wide_cstr(record.display_name) },
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,6 +842,38 @@ mod tests {
         // SAFETY: `service` is valid and open from the call just above.
         unsafe { control(service, ServiceControl::Interrogate) }
             .expect("ControlService should succeed interrogating a real, running service");
+
+        // SAFETY: `service`/`scm` are still open (not yet closed).
+        unsafe { close(service) }.expect("CloseServiceHandle should succeed on the service handle");
+        unsafe { close(scm) }.expect("CloseServiceHandle should succeed on the SCM handle");
+    }
+
+    #[test]
+    fn config_reports_a_plausible_configuration_for_the_event_log_service() {
+        let scm = open_manager(SC_MANAGER_CONNECT)
+            .expect("OpenSCManagerW should succeed with SC_MANAGER_CONNECT");
+        // SAFETY: `scm` is valid and open from the call just above.
+        let service = unsafe { open_service(scm, "EventLog", SERVICE_QUERY_CONFIG) }
+            .expect("OpenServiceW should succeed for the well-known EventLog service");
+
+        // SAFETY: `service` is valid and open from the call just above.
+        let config = unsafe { config(service) }
+            .expect("QueryServiceConfigW should succeed for a valid service handle");
+        assert!(
+            !config.binary_path_name.is_empty(),
+            "a real service should have a nonempty binary path"
+        );
+        assert!(
+            !config.display_name.is_empty(),
+            "a real service should have a nonempty display name"
+        );
+        // SERVICE_BOOT_START(0)..SERVICE_DISABLED(4) -- the five
+        // documented `dwStartType` values.
+        assert!(
+            config.start_type <= 4,
+            "start_type should be one of the five documented SERVICE_*_START/SERVICE_DISABLED values, got: {}",
+            config.start_type
+        );
 
         // SAFETY: `service`/`scm` are still open (not yet closed).
         unsafe { close(service) }.expect("CloseServiceHandle should succeed on the service handle");

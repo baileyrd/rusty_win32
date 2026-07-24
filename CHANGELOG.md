@@ -5,6 +5,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `service::config` (`QueryServiceConfigW`) plus `ServiceConfig` — one
+  service's static configuration (start type, binary path, display name,
+  dependencies), for a `systemctl show`-style detail view. Grows the
+  buffer on `ERROR_INSUFFICIENT_BUFFER`, needing only one retry since
+  `QueryServiceConfigW` reports the exact size up front. `dependencies`
+  decodes `lpDependencies`'s `REG_MULTI_SZ`-shaped list into an owned
+  `Vec<String>`.
 - `service::control` (`ControlService`) plus `ServiceControl`
   (`Stop`/`Pause`/`Continue`/`Interrogate`) and `SERVICE_INTERROGATE` —
   send a stop/pause/continue/interrogate control to a running service.
