@@ -557,6 +557,135 @@ pub unsafe fn spawn_suspended(
     })
 }
 
+/// `EXTENDED_STARTUPINFO_PRESENT` — the `CreateProcessW` creation flag
+/// declaring that `lpStartupInfo` points at a `STARTUPINFOEXW` (with a
+/// live `lpAttributeList`), not a bare `STARTUPINFOW`. Verified against
+/// mingw-w64's own `winbase.h` with a compiled `_Static_assert` probe.
+const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
+
+// STARTUPINFOEXW: `size_of` 112, `align_of` 8 on x86_64, `lpAttributeList`
+// at offset 104 — exactly `StartupInfoW` (104 bytes) plus one trailing
+// pointer, verified against mingw-w64's own `winbase.h` with a compiled
+// `_Static_assert` probe (including the full `CreateProcessW` call it
+// would go into, cast from `LPSTARTUPINFOW` the same way this module's
+// own `spawn_suspended_with_pseudoconsole` does).
+#[repr(C)]
+struct StartupInfoExW {
+    startup_info: StartupInfoW,
+    lp_attribute_list: *mut u8,
+}
+
+const _: () = assert!(core::mem::size_of::<StartupInfoExW>() == 112);
+const _: () = assert!(core::mem::align_of::<StartupInfoExW>() == 8);
+const _: () = assert!(core::mem::offset_of!(StartupInfoExW, lp_attribute_list) == 104);
+
+/// Start `command_line` suspended, hosted by an already-created
+/// pseudoconsole — a wholly new function alongside [`spawn_suspended`]
+/// (not a breaking change to it), for a fully-interactive child rather
+/// than one with redirected stdio pipes. `hpc` supplies the child's
+/// console I/O, so unlike `spawn_suspended` there is no `inherit_handles`
+/// parameter — irrelevant once a pseudoconsole is in the picture.
+///
+/// Builds a one-attribute [`crate::conpty::AttributeList`], binds `hpc`
+/// into it via `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, then calls
+/// `CreateProcessW` with a `STARTUPINFOEXW` (`EXTENDED_STARTUPINFO_PRESENT`
+/// set, `cb` sized for the *extended* struct — `CreateProcessW`'s own
+/// documented requirement once that flag is set) rather than a bare
+/// `StartupInfoW`. The attribute list is torn down (`Drop`) before this
+/// function returns either way; only `hpc` itself outlives the call, for
+/// the caller to eventually [`crate::conpty::resize`]/
+/// [`crate::conpty::close`] once the child exits.
+///
+/// The full picture this function is one piece of: two anonymous pipe
+/// pairs ([`crate::handle::create_pipe`]) → [`crate::conpty::create`]
+/// bound to one pipe's read end and the other's write end (closing the
+/// caller's own copies of those two ends right after, per `create`'s own
+/// documented pattern) → **this function** → [`crate::conpty::resize`]
+/// any time afterward → (after the child exits)
+/// [`crate::conpty::close`].
+///
+/// # Safety
+///
+/// `command_line` must already be a valid, correctly-quoted Windows
+/// command line for the target program, same contract as
+/// `spawn_suspended`. `hpc` must be a currently-open, valid pseudoconsole
+/// handle from [`crate::conpty::create`], not yet
+/// [`crate::conpty::close`]-d.
+pub unsafe fn spawn_suspended_with_pseudoconsole(
+    command_line: &str,
+    hpc: crate::conpty::Hpcon,
+) -> Result<SpawnedProcess, Win32Error> {
+    let mut wide: Vec<u16> = command_line
+        .encode_utf16()
+        .chain(core::iter::once(0))
+        .collect();
+
+    let mut attribute_list = crate::conpty::AttributeList::init(1)?;
+    // SAFETY: `hpc` is caller-supplied per this function's own safety
+    // contract. For `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` specifically,
+    // Windows' own documented usage (and its official ConPTY sample)
+    // passes the `HPCON` handle's own pointer-sized *value* directly as
+    // `lpValue` -- not `&hpc`, a pointer to a local holding that value.
+    // Passing `&hpc` compiles and type-checks identically (both are
+    // `*const c_void`-shaped) but is a real, silent bug: it binds the
+    // address of this function's own stack slot instead of the handle
+    // itself, so the spawned child gets a bogus pseudoconsole reference
+    // and fails during its own console-subsystem startup
+    // (`STATUS_DLL_INIT_FAILED`, confirmed by this function's own test
+    // failing exactly that way before this was fixed).
+    unsafe {
+        attribute_list.update(
+            crate::conpty::PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+            hpc.cast_const(),
+            core::mem::size_of::<crate::conpty::Hpcon>(),
+        )
+    }?;
+
+    let mut startup_info_ex = StartupInfoExW {
+        startup_info: StartupInfoW {
+            cb: core::mem::size_of::<StartupInfoExW>() as u32,
+            ..Default::default()
+        },
+        lp_attribute_list: attribute_list.as_mut_ptr(),
+    };
+    let mut process_info = ProcessInformationRaw::default();
+
+    // SAFETY: `wide` is a valid, mutable, NUL-terminated UTF-16 buffer;
+    // `startup_info_ex` is a valid, correctly-sized `STARTUPINFOEXW` with
+    // `cb` set to its own (extended) `size_of` as `CreateProcessW`
+    // requires once `EXTENDED_STARTUPINFO_PRESENT` is set; passing the
+    // address of the embedded `startup_info` field is valid as a
+    // `STARTUPINFOEXW*` since it's `StartupInfoExW`'s first field at
+    // offset 0, the same address as the whole extended struct;
+    // `process_info` is a valid, correctly-sized out pointer;
+    // `inherit_handles = FALSE` since the pseudoconsole (not inherited
+    // handles) supplies the child's console I/O; every other pointer
+    // argument is a documented-valid NULL.
+    let ok = unsafe {
+        CreateProcessW(
+            core::ptr::null(),
+            wide.as_mut_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            0,
+            CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
+            core::ptr::null(),
+            core::ptr::null(),
+            &mut startup_info_ex.startup_info,
+            &mut process_info,
+        )
+    };
+    if ok == 0 {
+        return Err(Win32Error::last());
+    }
+    Ok(SpawnedProcess {
+        process: process_info.h_process,
+        thread: process_info.h_thread,
+        process_id: process_info.dw_process_id,
+        thread_id: process_info.dw_thread_id,
+    })
+}
+
 /// Build a Windows environment block for [`spawn_suspended`]'s
 /// `environment` parameter: each `("NAME", "value")` pair encoded as a
 /// NUL-terminated UTF-16 `"NAME=value"` string, back to back, with one
@@ -1653,6 +1782,62 @@ mod tests {
             crate::handle::close(spawned.process).unwrap();
             crate::handle::close(spawned.thread).unwrap();
         }
+    }
+
+    #[test]
+    fn spawn_suspended_with_pseudoconsole_resume_wait_round_trip() {
+        let (input_read, input_write) = crate::handle::create_pipe()
+            .expect("create_pipe should succeed for the pseudoconsole's input pipe");
+        let (output_read, output_write) = crate::handle::create_pipe()
+            .expect("create_pipe should succeed for the pseudoconsole's output pipe");
+        let size = crate::console::Coord { x: 80, y: 25 };
+        // SAFETY: `input_read`/`output_write` are freshly created, open
+        // pipe handles from the calls above.
+        let hpc = unsafe { crate::conpty::create(input_read, output_write, size) }
+            .expect("CreatePseudoConsole should succeed with a fresh pipe pair");
+        // SAFETY: per `conpty::create`'s documented pattern, close this
+        // test's own copies now that ConPTY has duplicated them
+        // internally.
+        unsafe { crate::handle::close(input_read) }
+            .expect("closing this test's own copy of the input pipe's read end should succeed");
+        unsafe { crate::handle::close(output_write) }
+            .expect("closing this test's own copy of the output pipe's write end should succeed");
+
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known system binary; `hpc` is a live, valid pseudoconsole
+        // handle from `conpty::create` above.
+        let spawned = unsafe { spawn_suspended_with_pseudoconsole("cmd.exe /c exit 7", hpc) }
+            .expect("CreateProcessW should succeed with EXTENDED_STARTUPINFO_PRESENT");
+        assert_ne!(spawned.process_id, 0);
+        assert_ne!(spawned.thread_id, 0);
+
+        // Still suspended: a zero-timeout wait must time out, not report
+        // an exit -- proves CREATE_SUSPENDED actually held the thread.
+        // SAFETY: `spawned.process` is a freshly created, valid handle.
+        let still_suspended = unsafe { wait(spawned.process, Some(0)) }.unwrap();
+        assert_eq!(still_suspended, None);
+
+        // SAFETY: `spawned.thread` is a freshly created, valid,
+        // not-yet-resumed thread handle.
+        unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
+
+        // SAFETY: `spawned.process` is a valid, currently-open handle.
+        let exit_code = unsafe { wait(spawned.process, None) }.unwrap();
+        assert_eq!(exit_code, Some(7));
+
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+        }
+
+        // SAFETY: `hpc` is still open from the calls above; the child
+        // has already exited, matched by the `wait` call above.
+        unsafe { crate::conpty::close(hpc) };
+        unsafe { crate::handle::close(input_write) }
+            .expect("closing the input pipe's write end should succeed");
+        unsafe { crate::handle::close(output_read) }
+            .expect("closing the output pipe's read end should succeed");
     }
 
     #[test]

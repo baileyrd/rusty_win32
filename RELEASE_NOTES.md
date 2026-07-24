@@ -6,6 +6,53 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #259 — process: add spawn_suspended_with_pseudoconsole
+**2026-07-24** · [#259](https://github.com/baileyrd/rusty_win32/pull/259)
+
+- **Fixed:** CI caught a real bug in this same PR's first push: the
+  `AttributeList::update` call binding `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`
+  passed `&hpc` (the address of the local `Hpcon` variable) instead of
+  `hpc` itself (the handle's own pointer-sized value). Both compile and
+  type-check identically (`*const c_void`-shaped either way), so nothing
+  caught it locally — the spawned `cmd.exe /c exit 7` child ran but
+  failed its own console-subsystem startup with `STATUS_DLL_INIT_FAILED`
+  (`0xC0000142`), reported as its real exit code by the test's own
+  `wait` call. Windows' documented usage for this one attribute (and its
+  official ConPTY sample) passes the `HPCON` value directly as
+  `lpValue`, unlike most other process-thread attributes which take a
+  pointer to a variable holding the value — fixed by passing
+  `hpc.cast_const()` instead of `(&hpc as *const Hpcon).cast()`.
+- **Added:** `process::spawn_suspended_with_pseudoconsole` plus
+  `StartupInfoExW`/`EXTENDED_STARTUPINFO_PRESENT`, closing issue #189 —
+  a wholly new function alongside `process::spawn_suspended` (verified
+  non-breaking: no change to that function's existing public signature)
+  that starts a command suspended, hosted by an already-created
+  pseudoconsole (`conpty::create`, PR #257), for a fully-interactive
+  child rather than one with redirected stdio pipes. Builds a one-
+  attribute `conpty::AttributeList` (PR #258), binds the caller's
+  `Hpcon` in via `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, then calls
+  `CreateProcessW` with a `STARTUPINFOEXW` — `EXTENDED_STARTUPINFO_PRESENT`
+  set, `cb` sized for the *extended* struct (`CreateProcessW`'s own
+  documented requirement once that flag is set) — instead of a bare
+  `StartupInfoW`, and drops `spawn_suspended`'s `inherit_handles`
+  parameter (irrelevant once a pseudoconsole supplies the child's
+  console I/O; hardcoded `FALSE`). `STARTUPINFOEXW` (112 bytes, 8-byte
+  aligned, `lpAttributeList` at offset 104 — exactly `StartupInfoW`'s
+  104 bytes plus one trailing pointer) and `EXTENDED_STARTUPINFO_PRESENT`
+  (`0x0008_0000`) verified via a compiled mingw-w64 probe that also
+  exercises the real `CreateProcessW` call shape. Added a `pub(crate)`
+  `AttributeList::as_mut_ptr` accessor (`conpty.rs`) since this is that
+  type's first real, non-test caller. The attribute list is torn down
+  via `Drop` before this function returns either way; only the caller's
+  `Hpcon` outlives the call, for `conpty::resize`/`conpty::close`
+  afterward. Tested end-to-end: a real pipe pair, `conpty::create`, this
+  function spawning `cmd.exe /c exit 7`, confirming `CREATE_SUSPENDED`
+  actually held the thread (a zero-timeout `wait` reports no exit before
+  `resume`), then `resume`/`wait` reporting the real exit code, matching
+  `spawn_suspended`'s own existing round-trip test shape. This closes
+  out the `conpty` module's round-2 scope (issues #187-190), and with
+  it this entire round-2 parity-loop batch.
+
 ## PR #258 — conpty: add process-attribute-list plumbing
 **2026-07-24** · [#258](https://github.com/baileyrd/rusty_win32/pull/258)
 
