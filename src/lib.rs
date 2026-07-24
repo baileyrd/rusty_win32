@@ -360,3 +360,12 @@ pub mod service;
 // reason as the others above — reach it via `rusty_win32::net::*`.
 #[cfg(windows)]
 pub mod net;
+
+// `conpty` is a fifth brand-new round-2 subsystem, excluded until now for
+// an architectural-boundary reason rather than a "no consumer" one:
+// `rusty_lines` reads its own inherited stdin rather than hosting a
+// child's terminal. Starts with the pseudoconsole lifecycle itself. Not
+// re-exported at the crate root, for the same reason as the others above
+// — reach it via `rusty_win32::conpty::*`.
+#[cfg(windows)]
+pub mod conpty;

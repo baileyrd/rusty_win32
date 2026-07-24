@@ -6,6 +6,40 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #257 — conpty: add pseudoconsole lifecycle + Hpcon
+**2026-07-24** · [#257](https://github.com/baileyrd/rusty_win32/pull/257)
+
+- **Added:** `conpty` module (new subsystem): `conpty::create`/
+  `conpty::resize`/`conpty::close` (`CreatePseudoConsole`/
+  `ResizePseudoConsole`/`ClosePseudoConsole`), closing issue #187, plus
+  `Hpcon`/`PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, closing issue #190 —
+  folded into this same PR since `create`'s own signature
+  (`Result<Hpcon, Win32Error>`) already needs the `Hpcon` type issue
+  #190 owns, the same real, signature-level dependency that combined
+  `net::bind`/`SocketAddr` into one PR earlier in round 2 (issue #175 +
+  #185, PR #246). `HPCON` (8-byte pointer-shaped), `COORD` (reused from
+  `console::Coord`), and `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`
+  (`0x0002_0016`, from Windows' own `ProcThreadAttributeValue` macro)
+  all verified via a compiled mingw-w64 probe, built with
+  `-D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -DNTDDI_VERSION=0x0A000006` to
+  see past `CreatePseudoConsole`/`ResizePseudoConsole`/
+  `ClosePseudoConsole`'s version guard (a C-header-only concern — the
+  real symbols link fine regardless, confirmed present in
+  `libkernel32.a` via `nm`). `CreatePseudoConsole`/`ResizePseudoConsole`
+  are this crate's only `HRESULT`-returning functions (everything else
+  reports failure via ordinary `GetLastError()`); both unwrap that
+  `HRESULT` back to the plain Win32 error code it was built from via
+  `HRESULT_FROM_WIN32`'s well-defined, reversible bit layout, rather
+  than exposing a raw `HRESULT` this crate's `Win32Error`/
+  `FormatMessageW` machinery wouldn't recognize. Tested the full
+  create/resize/close lifecycle against a real pipe pair, including the
+  documented "caller closes its own copies of the input/output handles
+  right after `CreatePseudoConsole` succeeds" pattern (ConPTY duplicates
+  them internally). `InitializeProcThreadAttributeList`/
+  `UpdateProcThreadAttribute`/`DeleteProcThreadAttributeList` (issue
+  #188) and `process::spawn_suspended_with_pseudoconsole` (issue #189)
+  are next.
+
 ## PR #256 — net: add byte-order conversions
 **2026-07-24** · [#256](https://github.com/baileyrd/rusty_win32/pull/256)
 

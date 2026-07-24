@@ -5,6 +5,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `conpty` module (new subsystem): `conpty::create`/`conpty::resize`/
+  `conpty::close` (`CreatePseudoConsole`/`ResizePseudoConsole`/
+  `ClosePseudoConsole`) plus `Hpcon` and
+  `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` — the pseudoconsole lifecycle,
+  the first piece of ConPTY support. `Hpcon`/`PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`
+  were originally a separate issue, folded in here since `create`'s own
+  signature already needs the `Hpcon` type.
 - `net::htons`/`net::htonl`/`net::ntohs`/`net::ntohl` — thin wrappers
   over the Winsock functions of the same name, for callers building or
   parsing their own raw wire fields rather than going through
