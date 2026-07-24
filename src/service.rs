@@ -67,6 +67,18 @@ unsafe extern "system" {
         buf_size: u32,
         bytes_needed: *mut u32,
     ) -> i32;
+    fn GetServiceDisplayNameW(
+        scm: RawHandle,
+        service_name: *const u16,
+        display_name: *mut u16,
+        buf_len: *mut u32,
+    ) -> i32;
+    fn GetServiceKeyNameW(
+        scm: RawHandle,
+        display_name: *const u16,
+        service_name: *mut u16,
+        buf_len: *mut u32,
+    ) -> i32;
 }
 
 /// `SC_MANAGER_CONNECT` — the minimal access right needed to open a
@@ -670,6 +682,117 @@ pub unsafe fn config(handle: RawHandle) -> Result<ServiceConfig, Win32Error> {
     }
 }
 
+/// The number of times [`display_name`]/[`key_name`] retry after
+/// `ERROR_INSUFFICIENT_BUFFER` with a larger buffer than the size
+/// `GetServiceDisplayNameW`/`GetServiceKeyNameW` themselves reported —
+/// both functions have a real, documented-elsewhere Windows quirk where
+/// the reported required size is sometimes still one character short of
+/// what the very next call actually needs, so this crate grows past the
+/// reported size rather than trusting it exactly. Bounded rather than an
+/// unconditional loop, in case a future Windows version's behavior
+/// changes and this stops converging.
+const NAME_QUERY_MAX_RETRIES: u32 = 4;
+
+/// Translate a service's short key name (`"eventlog"`) to its
+/// human-readable display name (`"Windows Event Log"`) —
+/// `GetServiceDisplayNameW`. The reverse direction of [`key_name`].
+///
+/// Grows the buffer past whatever size `GetServiceDisplayNameW` itself
+/// reports on `ERROR_INSUFFICIENT_BUFFER` — see
+/// [`NAME_QUERY_MAX_RETRIES`]'s own doc comment for why one extra
+/// character of headroom isn't always enough in practice.
+///
+/// # Safety
+///
+/// `scm` must be a currently-open, valid SCM handle from
+/// [`open_manager`] with at least [`SC_MANAGER_CONNECT`].
+pub unsafe fn display_name(
+    scm: RawHandle,
+    key_name: &str,
+) -> Result<alloc::string::String, Win32Error> {
+    let wide_key: Vec<u16> = key_name.encode_utf16().chain(core::iter::once(0)).collect();
+    let mut buf_len: u32 = 0;
+    for _ in 0..=NAME_QUERY_MAX_RETRIES {
+        let mut buf: Vec<u16> = alloc::vec![0u16; buf_len as usize];
+        let mut actual_len = buf_len;
+        // SAFETY: `scm` is caller-supplied per this function's own safety
+        // contract; `wide_key` is a valid, NUL-terminated UTF-16 string
+        // live for the whole call; `buf` is a valid buffer (possibly
+        // zero-length, in which case a null/zeroed `lpDisplayName` with
+        // `buf_len` `0` is documented to report the required size
+        // without needing a real buffer yet) matched by `actual_len`
+        // naming its exact length.
+        let ok = unsafe {
+            GetServiceDisplayNameW(scm, wide_key.as_ptr(), buf.as_mut_ptr(), &mut actual_len)
+        };
+        if ok != 0 {
+            return Ok(alloc::string::String::from_utf16_lossy(
+                &buf[..actual_len as usize],
+            ));
+        }
+        let err = Win32Error::last();
+        if err != Win32Error::ERROR_INSUFFICIENT_BUFFER {
+            return Err(err);
+        }
+        buf_len = actual_len.max(buf_len + 1) + 1;
+    }
+    Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
+}
+
+/// Translate a service's human-readable display name
+/// (`"Windows Event Log"`) to its short key name (`"eventlog"`) —
+/// `GetServiceKeyNameW`. The reverse direction of [`display_name`].
+///
+/// Grows the buffer past whatever size `GetServiceKeyNameW` itself
+/// reports on `ERROR_INSUFFICIENT_BUFFER` — see
+/// [`NAME_QUERY_MAX_RETRIES`]'s own doc comment for why one extra
+/// character of headroom isn't always enough in practice.
+///
+/// # Safety
+///
+/// `scm` must be a currently-open, valid SCM handle from
+/// [`open_manager`] with at least [`SC_MANAGER_CONNECT`].
+pub unsafe fn key_name(
+    scm: RawHandle,
+    display_name: &str,
+) -> Result<alloc::string::String, Win32Error> {
+    let wide_display: Vec<u16> = display_name
+        .encode_utf16()
+        .chain(core::iter::once(0))
+        .collect();
+    let mut buf_len: u32 = 0;
+    for _ in 0..=NAME_QUERY_MAX_RETRIES {
+        let mut buf: Vec<u16> = alloc::vec![0u16; buf_len as usize];
+        let mut actual_len = buf_len;
+        // SAFETY: `scm` is caller-supplied per this function's own safety
+        // contract; `wide_display` is a valid, NUL-terminated UTF-16
+        // string live for the whole call; `buf` is a valid buffer
+        // (possibly zero-length, in which case a null/zeroed
+        // `lpServiceName` with `buf_len` `0` is documented to report the
+        // required size without needing a real buffer yet) matched by
+        // `actual_len` naming its exact length.
+        let ok = unsafe {
+            GetServiceKeyNameW(
+                scm,
+                wide_display.as_ptr(),
+                buf.as_mut_ptr(),
+                &mut actual_len,
+            )
+        };
+        if ok != 0 {
+            return Ok(alloc::string::String::from_utf16_lossy(
+                &buf[..actual_len as usize],
+            ));
+        }
+        let err = Win32Error::last();
+        if err != Win32Error::ERROR_INSUFFICIENT_BUFFER {
+            return Err(err);
+        }
+        buf_len = actual_len.max(buf_len + 1) + 1;
+    }
+    Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,6 +1000,46 @@ mod tests {
 
         // SAFETY: `service`/`scm` are still open (not yet closed).
         unsafe { close(service) }.expect("CloseServiceHandle should succeed on the service handle");
+        unsafe { close(scm) }.expect("CloseServiceHandle should succeed on the SCM handle");
+    }
+
+    #[test]
+    fn display_name_then_key_name_round_trips_for_the_event_log_service() {
+        let scm = open_manager(SC_MANAGER_CONNECT)
+            .expect("OpenSCManagerW should succeed with SC_MANAGER_CONNECT");
+
+        // SAFETY: `scm` is valid and open from the call just above.
+        let display = unsafe { display_name(scm, "EventLog") }
+            .expect("GetServiceDisplayNameW should succeed for the well-known EventLog service");
+        assert!(
+            !display.is_empty(),
+            "EventLog's display name should be nonempty"
+        );
+
+        // SAFETY: `scm` is still valid and open.
+        let key = unsafe { key_name(scm, &display) }.expect(
+            "GetServiceKeyNameW should succeed round-tripping the display name just fetched",
+        );
+        assert!(
+            key.eq_ignore_ascii_case("EventLog"),
+            "round-tripping EventLog's display name back to a key name should recover \"eventlog\" (case-insensitive), got: {key}"
+        );
+
+        // SAFETY: `scm` is still open (not yet closed).
+        unsafe { close(scm) }.expect("CloseServiceHandle should succeed on the SCM handle");
+    }
+
+    #[test]
+    fn display_name_fails_for_a_nonexistent_service_name() {
+        let scm = open_manager(SC_MANAGER_CONNECT)
+            .expect("OpenSCManagerW should succeed with SC_MANAGER_CONNECT");
+
+        // SAFETY: `scm` is valid and open from the call just above.
+        let err = unsafe { display_name(scm, "rusty_win32_definitely_not_a_real_service") }
+            .expect_err("GetServiceDisplayNameW should fail for a nonexistent service name");
+        assert_eq!(err, Win32Error::ERROR_SERVICE_DOES_NOT_EXIST);
+
+        // SAFETY: `scm` is still open (not yet closed).
         unsafe { close(scm) }.expect("CloseServiceHandle should succeed on the SCM handle");
     }
 }
