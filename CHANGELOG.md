@@ -5,6 +5,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `net::socket`/`net::close_socket` (`socket`/`closesocket`) plus
+  `RawSocket`, `AddressFamily` (`Inet`/`Inet6`), `SocketKind`
+  (`Stream`/`Dgram`), and `Protocol` (`Tcp`/`Udp`) — socket lifecycle
+  create/destroy. `RawSocket = usize` is a distinct handle namespace
+  from `handle::RawHandle`: a `SOCKET` is closed via `close_socket`,
+  never `CloseHandle`.
 - `net` module (new subsystem): `net::startup`/`net::cleanup`
   (`WSAStartup`/`WSACleanup`) — Winsock's own load/unload lifecycle, the
   one primitive with no POSIX/`rusty_libc` analog (every other Winsock
