@@ -6,6 +6,27 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #267 — conpty: expose UpdateProcThreadAttribute's PROC_THREAD_ATTRIBUTE_REPLACE_VALUE flag
+**2026-08-05** · [#267](https://github.com/baileyrd/rusty_win32/pull/267)
+
+- **Added:** `conpty::AttributeList::update_with_flags` plus
+  `conpty::PROC_THREAD_ATTRIBUTE_REPLACE_VALUE`, closing issue #264 — the
+  second and last gap found by the same narrow parity-loop pass that
+  produced PR #266 (`gap-analysis.md`, PR #265). `AttributeList::update`
+  had always hardcoded `UpdateProcThreadAttribute`'s `dwFlags` to `0`, so a
+  caller could never call `update` a second time on the same attribute id
+  — e.g. rebinding a different `Hpcon` into an already-initialized list
+  without tearing it down and re-`init`-ing a fresh one. Windows requires
+  `PROC_THREAD_ATTRIBUTE_REPLACE_VALUE` for that second call to succeed.
+  `update_with_flags` is a wholly new method alongside `update` (verified
+  non-breaking: no change to `update`'s existing public signature);
+  `update` now forwards to `update_with_flags(..., 0)`, the same hardcoded
+  value it always passed. Tests cover both the failure mode without the
+  flag and the successful rebind with it — this closes out the
+  parity-loop pass started in PR #265 with zero remaining gaps.
+
+---
+
 ## PR #266 — conpty: expose CreatePseudoConsole's PSEUDOCONSOLE_INHERIT_CURSOR flag
 **2026-08-05** · [#266](https://github.com/baileyrd/rusty_win32/pull/266)
 
