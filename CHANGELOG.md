@@ -5,6 +5,15 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `conpty::AttributeList::update_with_flags` plus
+  `conpty::PROC_THREAD_ATTRIBUTE_REPLACE_VALUE` — closes issue #264, a
+  parity-loop gap: `AttributeList::update` hardcoded
+  `UpdateProcThreadAttribute`'s `dwFlags` to `0`, so a caller could never
+  call `update` a second time on the same attribute id (e.g. rebinding a
+  different `Hpcon` into an already-initialized list) — Windows requires
+  `PROC_THREAD_ATTRIBUTE_REPLACE_VALUE` for that to succeed. Added
+  alongside `update`, which now forwards to it with `flags = 0` — not a
+  signature change.
 - `conpty::create_with_flags` plus `conpty::PSEUDOCONSOLE_INHERIT_CURSOR` —
   closes issue #263, a parity-loop gap: `conpty::create` hardcoded
   `CreatePseudoConsole`'s `dwFlags` to `0`, so the only flag Windows

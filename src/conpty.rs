@@ -69,6 +69,14 @@ pub type Hpcon = *mut core::ffi::c_void;
 /// mingw-w64's own `winbase.h` with a compiled `_Static_assert` probe.
 pub const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x0002_0016;
 
+/// `UpdateProcThreadAttribute`'s only documented `dwFlags` bit —
+/// `PROC_THREAD_ATTRIBUTE_REPLACE_VALUE`. Passed to
+/// [`AttributeList::update_with_flags`]: required to successfully call
+/// `UpdateProcThreadAttribute` a second time on the same attribute id
+/// (Windows fails a same-id re-update without it). Verified against
+/// mingw-w64's own `processthreadsapi.h`.
+pub const PROC_THREAD_ATTRIBUTE_REPLACE_VALUE: u32 = 0x0000_0001;
+
 const HRESULT_WIN32_FACILITY_MASK: u32 = 0xFFFF_0000;
 const HRESULT_WIN32_FACILITY: u32 = 0x8007_0000;
 
@@ -269,6 +277,11 @@ impl AttributeList {
     /// `value`/`size` describe the attribute's value bytes (e.g. an
     /// [`Hpcon`] and its own `size_of`).
     ///
+    /// Requests no optional behavior (`dwFlags = 0`) — see
+    /// [`update_with_flags`](Self::update_with_flags) for a caller that
+    /// wants [`PROC_THREAD_ATTRIBUTE_REPLACE_VALUE`] (needed to call
+    /// `update` a second time on the same `attribute`).
+    ///
     /// # Safety
     ///
     /// `value` must point to `size` valid, readable bytes that stay
@@ -281,15 +294,45 @@ impl AttributeList {
         value: *const core::ffi::c_void,
         size: usize,
     ) -> Result<(), Win32Error> {
+        // SAFETY: forwards this function's own safety contract unchanged;
+        // `0` is the same hardcoded `dwFlags` value this function always
+        // passed before `update_with_flags` existed.
+        unsafe { self.update_with_flags(attribute, value, size, 0) }
+    }
+
+    /// [`update`](Self::update)'s more general counterpart — added
+    /// alongside it, not replacing it — taking `UpdateProcThreadAttribute`'s
+    /// `dwFlags` explicitly. `flags` is normally `0` (equivalent to
+    /// [`update`](Self::update)) or
+    /// [`PROC_THREAD_ATTRIBUTE_REPLACE_VALUE`], which Windows documents as
+    /// required to call this a second time on the same `attribute` (e.g.
+    /// rebinding a different [`Hpcon`] into an already-initialized list
+    /// without tearing it down and [`init`](Self::init)-ing a fresh one) —
+    /// without it, a same-`attribute` re-update fails. See
+    /// [`update`](Self::update) for the `attribute`/`value`/`size`
+    /// parameters.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`update`](Self::update): `value` must point to
+    /// `size` valid, readable bytes that stay alive and unmoved for as
+    /// long as this `AttributeList` is in use by `CreateProcessW`.
+    pub unsafe fn update_with_flags(
+        &mut self,
+        attribute: usize,
+        value: *const core::ffi::c_void,
+        size: usize,
+        flags: u32,
+    ) -> Result<(), Win32Error> {
         // SAFETY: `self.buffer` is a live, `init`-ed attribute list;
-        // `value`/`size` are caller-supplied per this function's own
-        // safety contract; `previous_value`/`return_size` are documented-
-        // valid NULLs (this crate never reads an attribute's prior
-        // value).
+        // `value`/`size`/`flags` are caller-supplied per this function's
+        // own safety contract; `previous_value`/`return_size` are
+        // documented-valid NULLs (this crate never reads an attribute's
+        // prior value).
         let ok = unsafe {
             UpdateProcThreadAttribute(
                 self.buffer.as_mut_ptr(),
-                0,
+                flags,
                 attribute,
                 value,
                 size,
@@ -468,5 +511,136 @@ mod tests {
             .expect("closing the input pipe's write end should succeed");
         unsafe { handle::close(output_read) }
             .expect("closing the output pipe's read end should succeed");
+    }
+
+    #[test]
+    fn attribute_list_update_without_replace_value_flag_fails_on_second_call() {
+        let (input_read, input_write) = handle::create_pipe()
+            .expect("create_pipe should succeed for the pseudoconsole's input pipe");
+        let (output_read, output_write) = handle::create_pipe()
+            .expect("create_pipe should succeed for the pseudoconsole's output pipe");
+        let size = Coord { x: 80, y: 25 };
+        // SAFETY: `input_read`/`output_write` are freshly created, open
+        // pipe handles from the calls above.
+        let hpc = unsafe { create(input_read, output_write, size) }
+            .expect("CreatePseudoConsole should succeed with a fresh pipe pair");
+        unsafe { handle::close(input_read) }
+            .expect("closing this test's own copy of the input pipe's read end should succeed");
+        unsafe { handle::close(output_write) }
+            .expect("closing this test's own copy of the output pipe's write end should succeed");
+
+        let mut list =
+            AttributeList::init(1).expect("InitializeProcThreadAttributeList should succeed");
+        // SAFETY: `hpc` is a live, valid HPCON from `create` above, and
+        // stays alive for the rest of this test.
+        unsafe {
+            list.update(
+                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                (&hpc as *const Hpcon).cast(),
+                core::mem::size_of::<Hpcon>(),
+            )
+        }
+        .expect("the first UpdateProcThreadAttribute call should succeed");
+
+        // A second plain `update` (dwFlags = 0) on the same attribute id,
+        // without PROC_THREAD_ATTRIBUTE_REPLACE_VALUE, must fail -- this is
+        // the exact behavior `update_with_flags`'s REPLACE_VALUE case
+        // (below) exists to unlock.
+        // SAFETY: same `hpc`/size as above, still live.
+        let second = unsafe {
+            list.update(
+                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                (&hpc as *const Hpcon).cast(),
+                core::mem::size_of::<Hpcon>(),
+            )
+        };
+        assert!(
+            second.is_err(),
+            "a second update on the same attribute id without REPLACE_VALUE should fail"
+        );
+
+        list.delete();
+        // SAFETY: `hpc` is still open from the calls above.
+        unsafe { close(hpc) };
+        unsafe { handle::close(input_write) }
+            .expect("closing the input pipe's write end should succeed");
+        unsafe { handle::close(output_read) }
+            .expect("closing the output pipe's read end should succeed");
+    }
+
+    #[test]
+    fn attribute_list_update_with_flags_replace_value_rebinds_a_second_hpcon() {
+        let (input_read1, input_write1) = handle::create_pipe()
+            .expect("create_pipe should succeed for the first pseudoconsole's input pipe");
+        let (output_read1, output_write1) = handle::create_pipe()
+            .expect("create_pipe should succeed for the first pseudoconsole's output pipe");
+        let (input_read2, input_write2) = handle::create_pipe()
+            .expect("create_pipe should succeed for the second pseudoconsole's input pipe");
+        let (output_read2, output_write2) = handle::create_pipe()
+            .expect("create_pipe should succeed for the second pseudoconsole's output pipe");
+        let size = Coord { x: 80, y: 25 };
+
+        // SAFETY: `input_read1`/`output_write1` are freshly created, open
+        // pipe handles from the calls above.
+        let hpc1 = unsafe { create(input_read1, output_write1, size) }
+            .expect("CreatePseudoConsole should succeed for the first pseudoconsole");
+        unsafe { handle::close(input_read1) }.expect(
+            "closing this test's own copy of the first input pipe's read end should succeed",
+        );
+        unsafe { handle::close(output_write1) }.expect(
+            "closing this test's own copy of the first output pipe's write end should succeed",
+        );
+
+        // SAFETY: `input_read2`/`output_write2` are freshly created, open
+        // pipe handles from the calls above.
+        let hpc2 = unsafe { create(input_read2, output_write2, size) }
+            .expect("CreatePseudoConsole should succeed for the second pseudoconsole");
+        unsafe { handle::close(input_read2) }.expect(
+            "closing this test's own copy of the second input pipe's read end should succeed",
+        );
+        unsafe { handle::close(output_write2) }.expect(
+            "closing this test's own copy of the second output pipe's write end should succeed",
+        );
+
+        let mut list =
+            AttributeList::init(1).expect("InitializeProcThreadAttributeList should succeed");
+        // SAFETY: `hpc1` is a live, valid HPCON from `create` above, and
+        // stays alive for the rest of this test.
+        unsafe {
+            list.update(
+                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                (&hpc1 as *const Hpcon).cast(),
+                core::mem::size_of::<Hpcon>(),
+            )
+        }
+        .expect("the first UpdateProcThreadAttribute call should succeed");
+
+        // Rebind the same attribute id to `hpc2` -- only possible with
+        // PROC_THREAD_ATTRIBUTE_REPLACE_VALUE set; the previous test proves
+        // this fails without it.
+        // SAFETY: `hpc2` is a live, valid HPCON from `create` above, and
+        // stays alive for the rest of this test.
+        unsafe {
+            list.update_with_flags(
+                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                (&hpc2 as *const Hpcon).cast(),
+                core::mem::size_of::<Hpcon>(),
+                PROC_THREAD_ATTRIBUTE_REPLACE_VALUE,
+            )
+        }
+        .expect("update_with_flags with PROC_THREAD_ATTRIBUTE_REPLACE_VALUE should succeed rebinding a second HPCON");
+
+        list.delete();
+        // SAFETY: `hpc1`/`hpc2` are still open from the calls above.
+        unsafe { close(hpc1) };
+        unsafe { close(hpc2) };
+        unsafe { handle::close(input_write1) }
+            .expect("closing the first input pipe's write end should succeed");
+        unsafe { handle::close(output_read1) }
+            .expect("closing the first output pipe's read end should succeed");
+        unsafe { handle::close(input_write2) }
+            .expect("closing the second input pipe's write end should succeed");
+        unsafe { handle::close(output_read2) }
+            .expect("closing the second output pipe's read end should succeed");
     }
 }
